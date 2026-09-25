@@ -44,6 +44,7 @@ export class Viewmodel {
         const maxDim = Math.max(size.x, size.y, size.z) || 1
         model.scale.setScalar(0.5 / maxDim)
         model.position.set(0, 0, 0)
+        model.rotation.y = Math.PI
         const gun = new THREE.Group()
         gun.add(model)
         this.models.set('primary-handgun', gun)
