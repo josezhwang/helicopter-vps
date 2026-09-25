@@ -65,11 +65,12 @@ export class BattlefieldGame {
     // World
     createSkyAndLights(this.scene)
     const terrain = createTerrain()
+    const worldCircles: Array<{ x: number; z: number; r: number }> = []
     this.scene.add(terrain)
     this.scene.add(createWater())
-    this.scene.add(createForest())
-    this.scene.add(createRocks())
-    this.scene.add(createBushes())
+    this.scene.add(createForest(worldCircles))
+    this.scene.add(createRocks(worldCircles))
+    this.scene.add(createBushes(worldCircles))
     this.scene.add(createClouds())
 
     // Bases
@@ -97,6 +98,7 @@ export class BattlefieldGame {
     // Colliders from both bases for player/wall collision
     const colliders = [...this.ourBase.colliders, ...this.enemyBase.colliders]
     this.player.setColliders(colliders)
+    this.player.setCircles(worldCircles)
 
     // Weapon
     this.weapon = new Weapon(this.scene, this.camera, () => {
@@ -389,6 +391,11 @@ export class BattlefieldGame {
   private score = 0
 
   private updatePlayer(dt: number) {
+    this.player.setExtraCircle(
+      this.heli.object.position.x,
+      this.heli.object.position.z,
+      this.inHeli ? 0 : 7.5,
+    )
     if (this.inHeli) {
       setGameState({ nearHelicopter: false })
       return

@@ -121,8 +121,17 @@ export class Viewmodel {
     }
     if (model) {
       this.group.add(model)
+      this.group.renderOrder = 1000
       this.group.traverse((o) => {
         o.frustumCulled = false
+        o.renderOrder = 1000
+        const mesh = o as THREE.Mesh
+        if (!mesh.isMesh) return
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+        for (const material of materials) {
+          material.depthTest = false
+          material.depthWrite = false
+        }
       })
     }
   }

@@ -101,7 +101,7 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
   return group
 }
 
-export function createBushes(): THREE.Group {
+export function createBushes(circles?: Array<{ x: number; z: number; r: number }>): THREE.Group {
   const group = new THREE.Group()
   const rng = mulberry32(4242)
   const bushMat = new THREE.MeshStandardMaterial({ color: 0x5d7a3d, roughness: 1 })
@@ -122,6 +122,7 @@ export function createBushes(): THREE.Group {
     bush.rotation.y = rng() * Math.PI
     bush.castShadow = true
     group.add(bush)
+    circles?.push({ x, z, r: scale * 0.95 })
   }
 
   return group

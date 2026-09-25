@@ -120,13 +120,29 @@ export function Hud() {
             placeItems: 'center',
             background: 'rgba(5, 12, 18, 0.52)',
             color: '#e8f8ff',
-            fontSize: 34,
-            fontWeight: 700,
-            letterSpacing: 1.5,
             textShadow: '0 0 18px rgba(86, 220, 255, 0.8)',
+            pointerEvents: 'auto',
           }}
         >
-          VICTORY
+          <div style={{ display: 'grid', justifyItems: 'center', gap: 18 }}>
+            <div style={{ fontSize: 34, fontWeight: 700, letterSpacing: 1.5 }}>VICTORY!</div>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              style={{
+                padding: '10px 24px',
+                border: '1px solid rgba(143, 208, 255, 0.7)',
+                borderRadius: 6,
+                background: 'rgba(20, 54, 78, 0.9)',
+                color: '#eaf8ff',
+                font: '700 15px monospace',
+                cursor: 'pointer',
+                pointerEvents: 'auto',
+              }}
+            >
+              RETRY
+            </button>
+          </div>
         </div>
       )}
     </div>
