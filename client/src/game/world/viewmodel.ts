@@ -12,7 +12,7 @@ export class Viewmodel {
   private currentId: WeaponId | null = null
   private recoil = 0
   private models = new Map<WeaponId, THREE.Object3D>()
-  private basePos = new THREE.Vector3(0.72, -0.42, -0.8)
+  private basePos = new THREE.Vector3(0.92, -0.42, -0.8)
 
   constructor(private camera: THREE.PerspectiveCamera) {
     this.camera.add(this.group)

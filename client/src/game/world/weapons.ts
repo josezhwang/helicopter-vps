@@ -24,7 +24,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     name: 'Primary Handgun',
     power: 5,
     magSize: 12,
-    fireRate: 0.04,
+    fireRate: 0.09,
     range: 180,
     spread: 0.004,
     color: 0xffe8a3,
