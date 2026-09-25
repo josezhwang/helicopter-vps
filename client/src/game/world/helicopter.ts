@@ -48,6 +48,52 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
   let fallbackMainRotor: THREE.Object3D | null = null
   let fallbackTailRotor: THREE.Object3D | null = null
 
+  const addFallbackModel = () => {
+    if (object.children.length > 0) return
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3c5664, roughness: 0.7, metalness: 0.2 })
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0x8dc4d6, roughness: 0.2, metalness: 0.1 })
+    const rotorMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.6, metalness: 0.4 })
+
+    const body = new THREE.Mesh(new THREE.SphereGeometry(2.1, 16, 10), bodyMat)
+    body.scale.set(1, 0.75, 1.8)
+    body.position.y = 2.2
+    body.castShadow = true
+    object.add(body)
+
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(1.35, 16, 8), glassMat)
+    cockpit.scale.set(1, 0.75, 0.9)
+    cockpit.position.set(0, 2.35, 1.45)
+    cockpit.castShadow = true
+    object.add(cockpit)
+
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 5.5), bodyMat)
+    tail.position.set(0, 2.45, -3.4)
+    tail.castShadow = true
+    object.add(tail)
+
+    const rotorGroup = new THREE.Group()
+    rotorGroup.position.y = 4.15
+    for (let i = 0; i < 4; i++) {
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(8, 0.08, 0.35), rotorMat)
+      blade.rotation.y = (i / 4) * Math.PI
+      rotorGroup.add(blade)
+    }
+    rotorGroup.add(new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.45, 8), rotorMat))
+    object.add(rotorGroup)
+    fallbackMainRotor = rotorGroup
+
+    const rearRotorGroup = new THREE.Group()
+    rearRotorGroup.position.set(0, 2.6, -6.05)
+    for (let i = 0; i < 2; i++) {
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.1, 0.25), rotorMat)
+      blade.rotation.z = (i / 2) * Math.PI
+      rearRotorGroup.add(blade)
+    }
+    object.add(rearRotorGroup)
+    fallbackTailRotor = rearRotorGroup
+  }
+
   const heli: Helicopter = {
     object,
     parked: true,
@@ -180,6 +226,8 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
     undefined,
     (err) => {
       console.error('Failed to load helicopter GLB:', err)
+      addFallbackModel()
+      onLoaded?.(heli)
     },
   )
 
