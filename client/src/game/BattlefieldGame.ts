@@ -42,7 +42,7 @@ export class BattlefieldGame {
   private lastShotCount = 0
   private boarding = false
   private lastHeliYaw = 0
-  private heliCameraMode: 'cockpit' | 'chase' | 'under' = 'cockpit'
+  private heliCameraMode: 'cockpit' | 'chase' = 'cockpit'
 
   constructor(private container: HTMLElement) {
     // Renderer
@@ -262,16 +262,8 @@ export class BattlefieldGame {
 
   private cycleHelicopterCamera() {
     if (!this.inHeli || this.boarding) return
-    this.heliCameraMode = this.heliCameraMode === 'cockpit'
-      ? 'chase'
-      : this.heliCameraMode === 'chase'
-        ? 'under'
-        : 'cockpit'
-    const label = this.heliCameraMode === 'cockpit'
-      ? 'COCKPIT VIEW'
-      : this.heliCameraMode === 'chase'
-        ? 'CHASE VIEW'
-        : 'UNDER HELICOPTER VIEW'
+    this.heliCameraMode = this.heliCameraMode === 'cockpit' ? 'chase' : 'cockpit'
+    const label = this.heliCameraMode === 'cockpit' ? 'COCKPIT VIEW' : 'CHASE VIEW'
     setGameState({ message: `${label} — press V to change camera.` })
   }
 
@@ -365,10 +357,6 @@ export class BattlefieldGame {
       )
       this.camera.position.lerp(camTarget, Math.min(1, dt * 4))
       this.camera.lookAt(heliObj.position.x, heliObj.position.y + 2, heliObj.position.z)
-    } else {
-      const underPosition = heliObj.localToWorld(new THREE.Vector3(0, -8, 0))
-      this.camera.position.lerp(underPosition, Math.min(1, dt * 5))
-      this.camera.lookAt(heliObj.position.x, heliObj.position.y + 1.5, heliObj.position.z)
     }
   }
 

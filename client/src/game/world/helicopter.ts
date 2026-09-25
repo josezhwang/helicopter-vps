@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { heightAt } from './terrain'
 
 /** Seat offset where the player camera sits while piloting. */
-export const HELI_SEAT_OFFSET = new THREE.Vector3(0.0, 1.6, 0.4)
+export const HELI_SEAT_OFFSET = new THREE.Vector3(0.0, 1.25, 0.4)
 
 /** Hard RPM ceiling — Space can never spool the propeller past this. */
 export const MAX_ROTOR_RPM = 100
