@@ -2,7 +2,7 @@
   "compilerOptions": {
     "module": "commonjs",
     "target": "ES2021",
-    "lib": ["ES2021"],
+    "lib": ["ES2021", "DOM"],
     "declaration": true,
     "removeComments": true,
     "emitDecoratorMetadata": true,
@@ -10,6 +10,7 @@
     "strict": true,
     "strictPropertyInitialization": false,
     "skipLibCheck": true,
+    "rootDir": "./src",
     "outDir": "./dist",
     "sourceMap": true,
     "esModuleInterop": true
