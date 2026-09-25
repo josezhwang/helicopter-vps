@@ -39,6 +39,7 @@ export class BattlefieldGame {
   private disposed = false
   private targetList: THREE.Object3D[] = []
   private boundHandlers: Array<[EventTarget, string, EventListener]> = []
+  private lastShotCount = 0
 
   constructor(private container: HTMLElement) {
     // Renderer
@@ -424,18 +425,18 @@ export class BattlefieldGame {
       this.updateFlagsAndCapture()
 
       this.weapon.tick(dt)
+      if (!this.inHeli) {
+        this.weapon.tryFire(this.mouse, dt, this.targetList)
+      }
       this.viewmodel.show(this.weapon.weaponId)
       this.viewmodel.update(dt, {
-        recoilKick: this.mouse.shooting && !this.weapon.reloading && this.weapon.ammo > 0,
+        recoilKick: this.weapon.shotCount !== this.lastShotCount,
         reloading: this.weapon.reloading,
         hidden: this.inHeli || gameState.finished,
         moving: this.input.forward || this.input.back || this.input.left || this.input.right,
         time,
       })
-
-      if (!this.inHeli) {
-        this.weapon.tryFire(this.mouse, dt, this.targetList)
-      }
+      this.lastShotCount = this.weapon.shotCount
       this.syncHudState()
 
       // HUD: pilot telemetry (rotor RPM matches the classic x10 readout)

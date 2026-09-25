@@ -13,6 +13,7 @@ export class Weapon {
   private flashLight: THREE.PointLight
   private flashTimer = 0
   private onShoot?: () => void
+  private shotsFired = 0
 
   constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera, onShoot?: () => void) {
     this.scene = scene
@@ -46,6 +47,10 @@ export class Weapon {
     return this.def.id
   }
 
+  get shotCount(): number {
+    return this.shotsFired
+  }
+
   tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]) {
     this.flashTimer -= dt
     if (this.flashTimer <= 0) this.flashLight.intensity = 0
@@ -54,6 +59,7 @@ export class Weapon {
 
     this.cooldown = this.def.fireRate
     this.ammo--
+    this.shotsFired++
     this.onShoot?.()
 
     // Muzzle flash + hitscan with per-weapon spread
