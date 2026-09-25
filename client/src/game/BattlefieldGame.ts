@@ -42,6 +42,7 @@ export class BattlefieldGame {
   private lastShotCount = 0
   private boarding = false
   private lastHeliYaw = 0
+  private heliCameraMode: 'cockpit' | 'chase' | 'under' = 'cockpit'
 
   constructor(private container: HTMLElement) {
     // Renderer
@@ -185,6 +186,9 @@ export class BattlefieldGame {
         case 'KeyE':
           this.toggleHelicopter()
           break
+        case 'KeyV':
+          this.cycleHelicopterCamera()
+          break
       }
     }) as EventListener)
 
@@ -245,14 +249,30 @@ export class BattlefieldGame {
     this.player.yaw = this.heliYaw
     this.player.pitch = 0
     this.lastHeliYaw = this.heliYaw
+    this.heliCameraMode = 'cockpit'
     this.inHeli = true
     this.heli.setParked(false)
     this.heliFlightAltitude = this.heli.object.position.y
-    setGameState({ inHelicopter: true, message: 'Press SPACE to spin up the rotor. W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, E to exit.' })
+    setGameState({ inHelicopter: true, message: 'Press SPACE to spin up the rotor. W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, V camera, E to exit.' })
 
     await new Promise((resolve) => window.setTimeout(resolve, 550))
     this.heli.setDoorOpen(false)
     this.boarding = false
+  }
+
+  private cycleHelicopterCamera() {
+    if (!this.inHeli || this.boarding) return
+    this.heliCameraMode = this.heliCameraMode === 'cockpit'
+      ? 'chase'
+      : this.heliCameraMode === 'chase'
+        ? 'under'
+        : 'cockpit'
+    const label = this.heliCameraMode === 'cockpit'
+      ? 'COCKPIT VIEW'
+      : this.heliCameraMode === 'chase'
+        ? 'CHASE VIEW'
+        : 'UNDER HELICOPTER VIEW'
+    setGameState({ message: `${label} — press V to change camera.` })
   }
 
   private heliFlightAltitude = 0
@@ -331,10 +351,25 @@ export class BattlefieldGame {
       heliObj.rotation.set(this.heliPitch, yaw, this.heliRoll)
     }
 
-    const cockpitPosition = heliObj.localToWorld(HELI_SEAT_OFFSET.clone())
-    this.camera.position.lerp(cockpitPosition, Math.min(1, dt * 12))
-    this.camera.rotation.order = 'YXZ'
-    this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
+    if (this.heliCameraMode === 'cockpit') {
+      const cockpitPosition = heliObj.localToWorld(HELI_SEAT_OFFSET.clone())
+      this.camera.position.lerp(cockpitPosition, Math.min(1, dt * 12))
+      this.camera.rotation.order = 'YXZ'
+      this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
+    } else if (this.heliCameraMode === 'chase') {
+      const back = new THREE.Vector3(-dirX, 0, -dirZ).multiplyScalar(18)
+      const camTarget = new THREE.Vector3(
+        heliObj.position.x + back.x,
+        heliObj.position.y + 7,
+        heliObj.position.z + back.z,
+      )
+      this.camera.position.lerp(camTarget, Math.min(1, dt * 4))
+      this.camera.lookAt(heliObj.position.x, heliObj.position.y + 2, heliObj.position.z)
+    } else {
+      const underPosition = heliObj.localToWorld(new THREE.Vector3(0, -8, 0))
+      this.camera.position.lerp(underPosition, Math.min(1, dt * 5))
+      this.camera.lookAt(heliObj.position.x, heliObj.position.y + 1.5, heliObj.position.z)
+    }
   }
 
   private heliYaw = Math.PI * 0.25

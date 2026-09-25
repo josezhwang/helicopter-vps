@@ -159,7 +159,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       }
 
       if (state.parked) {
-        object.position.y = padWorldPos.y + Math.sin(time * 1.2) * 0.05
+        const landingY = padWorldPos.y + Math.sin(time * 1.2) * 0.05
+        object.position.y = THREE.MathUtils.lerp(object.position.y, landingY, Math.min(1, dt * 1.6))
+        object.rotation.x = THREE.MathUtils.lerp(object.rotation.x, 0, Math.min(1, dt * 2.5))
+        object.rotation.z = THREE.MathUtils.lerp(object.rotation.z, 0, Math.min(1, dt * 2.5))
       }
       // While piloted, the flight controller owns position.y entirely
     },
