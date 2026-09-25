@@ -1,10 +1,12 @@
+import 'dotenv/config'
 import { NestFactory } from '@nestjs/core'
 import { AppModule } from './app.module'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule)
-  app.enableCors({ origin: ['http://localhost:5173'] })
-  await app.listen(3001)
-  console.log('Game service listening on http://localhost:3001')
+  app.enableCors({ origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/] })
+  const port = 3002
+  await app.listen(port)
+  console.log(`Game service listening on http://localhost:${port}`)
 }
 bootstrap()
