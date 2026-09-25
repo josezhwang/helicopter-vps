@@ -4,6 +4,7 @@ import { AuthController } from './auth.controller'
 import { AuthService } from './auth.service'
 import { DatabaseService } from './database.service'
 import { GameModule } from './game/game.module'
+import { RealtimeService } from './realtime.service'
 import { RoomController } from './room.controller'
 import { RoomService } from './room.service'
 
@@ -19,6 +20,6 @@ import { RoomService } from './room.service'
     }),
   ],
   controllers: [AuthController, RoomController],
-  providers: [DatabaseService, AuthService, RoomService],
+  providers: [DatabaseService, AuthService, RoomService, RealtimeService],
 })
 export class AppModule {}

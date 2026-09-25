@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import { API_URL } from './config'
 import { Game } from './game/Game'
 import './styles.css'
 
@@ -7,7 +8,6 @@ type SiteView = AuthView | 'dashboard' | 'room' | 'play'
 type Room = { id: string; name: string; map: string; mode: string; maxMembers: number; memberCount: number; memberIds: string[]; status: 'waiting' | 'live' | 'finished'; creatorDisplayId: string; ping?: number }
 type User = { id: string; email: string; displayId: string; displayName: string }
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
 const ROOMS_POLL_MS = 3000
 
 class ApiError extends Error {
@@ -27,7 +27,7 @@ async function api<T>(path: string, options: RequestInit = {}, token?: string): 
 }
 
 function readHash() { return window.location.hash.replace(/^#\/?/, '') }
-function navigate(view: SiteView, roomId?: string) { window.location.hash = view === 'dashboard' ? '' : view === 'room' && roomId ? `/room/${roomId}` : `/${view}` }
+function navigate(view: SiteView, roomId?: string) { window.location.hash = view === 'dashboard' ? '' : (view === 'room' || view === 'play') && roomId ? `/${view}/${roomId}` : `/${view}` }
 
 function toRoom(room: Record<string, unknown>): Room {
   return { id: String(room.id), name: String(room.name), map: 'Sierra Basin', mode: String(room.battle_type), maxMembers: Number(room.max_members), memberCount: Number(room.member_count), memberIds: Array.isArray(room.member_ids) ? room.member_ids.map(String) : [], status: room.status as Room['status'], creatorDisplayId: String(room.creator_display_id ?? ''), ping: 24 }
@@ -40,7 +40,8 @@ export function App() {
   const [rooms, setRooms] = useState<Room[]>([])
 
   const roomId = hash.startsWith('room/') ? hash.slice('room/'.length) : null
-  const view: SiteView = hash === 'play' ? 'play' : roomId ? 'room' : token ? 'dashboard' : hash === 'signup' || hash === 'forgot' ? hash : 'login'
+  const playRoomId = hash.startsWith('play/') ? hash.slice('play/'.length) : null
+  const view: SiteView = playRoomId ? 'play' : roomId ? 'room' : token ? 'dashboard' : hash === 'signup' || hash === 'forgot' ? hash : 'login'
   const activeRoom = rooms.find((room) => room.id === roomId) ?? null
   const playing = view === 'play'
 
@@ -64,7 +65,7 @@ export function App() {
     return () => window.clearInterval(timer)
   }, [token, playing])
 
-  if (playing) return <Game />
+  if (playRoomId && token && user) return <Game key={playRoomId} roomId={playRoomId} token={token} />
   if (!user || !token) {
     const mode: AuthView = view === 'signup' || view === 'forgot' ? view : 'login'
     return <AuthScreen key={mode} mode={mode} onNavigate={navigate} onAuthenticated={(session) => { setToken(session.token); setUser(session.user); window.localStorage.setItem('aerium_token', session.token); window.localStorage.setItem('aerium_user', JSON.stringify(session.user)); navigate('dashboard') }} />
@@ -104,8 +105,8 @@ function RoomLobby({ room, user, token, onBack, onRefresh }: { room: Room; user:
   const isCreator = room.creatorDisplayId === user.displayId
   const isMember = room.memberIds.includes(user.id)
   const isFull = room.memberCount >= room.maxMembers
-  useEffect(() => { if (room.status === 'live' && isMember) navigate('play') }, [room.status, isMember])
+  useEffect(() => { if (room.status === 'live' && isMember) navigate('play', room.id) }, [room.status, isMember, room.id])
   const join = async () => { try { await api(`/rooms/${room.id}/join`, { method: 'POST' }, token); await onRefresh() } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not join room') } }
-  const start = async () => { try { await api(`/rooms/${room.id}/start`, { method: 'POST' }, token); navigate('play') } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not start room') } }
+  const start = async () => { try { await api(`/rooms/${room.id}/start`, { method: 'POST' }, token); navigate('play', room.id) } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not start room') } }
   return <main className="site-shell lobby-shell"><nav className="topbar"><button className="back-button" onClick={onBack}>← Operations</button><div className="brand-mark dark"><span className="brand-cross">+</span> AERIUM</div><div className="profile"><span className="online-dot" /> {user.displayName}</div></nav><section className="lobby-content"><div className="lobby-header"><div><p className="kicker">ROOM LOBBY / {room.id.slice(0, 8).toUpperCase()}</p><h1>{room.name}</h1><p className="muted">FLAG STEAL / {room.map}</p></div><span className={`room-status large ${room.status === 'waiting' ? 'open' : room.status}`}>{room.status === 'live' ? 'IN PROGRESS' : isFull ? 'ROOM FULL' : 'WAITING FOR PILOTS'}</span></div><div className="lobby-board"><div className="lobby-map"><div className="map-lines" /><span className="map-tag">FLAG STEAL</span><div className="map-coordinates">LIVE DATABASE<br />ROOM READY</div></div><div className="roster-panel"><div className="roster-title"><h2>Attendance</h2><span>{room.memberCount} / {room.maxMembers}</span></div><p className="form-hint">{isMember ? 'You are in this room. The game opens for every member when the creator starts it.' : 'Join to reserve your seat. Attendance updates live.'}</p><div className="lobby-actions">{!isCreator && !isMember && room.status === 'waiting' && <button className="button outline" onClick={join}>Join room</button>}{isCreator && <button className="button primary" disabled={!isFull || room.status !== 'waiting'} onClick={start}>{room.status !== 'waiting' ? 'Game started' : isFull ? 'Start game' : `Waiting for ${room.maxMembers - room.memberCount} more`}</button>}{error && <p className="form-error">{error}</p>}</div></div></div></section></main>
 }

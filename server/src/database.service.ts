@@ -59,6 +59,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         PRIMARY KEY (room_id, user_id)
       )
     `)
+    await this.pool.query(`ALTER TABLE room_member ADD COLUMN IF NOT EXISTS team TEXT CHECK (team IN ('red', 'blue'))`)
     console.log('PostgreSQL connected')
   }
 

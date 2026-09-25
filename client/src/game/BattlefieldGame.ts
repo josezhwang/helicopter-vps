@@ -1,14 +1,48 @@
 import * as THREE from 'three'
 import { createTerrain, createWater, createSkyAndLights, heightAt } from './world/terrain'
-import { createBase, animateFlag, type BaseObjects } from './world/bases'
+import { createBase, animateFlag, type BaseObjects, type Team } from './world/bases'
 import { createForest, createRocks, createBushes, createClouds } from './world/nature'
 import { createHelicopter, HELI_SEAT_OFFSET, type Helicopter } from './world/helicopter'
-import { Player } from './world/player'
+import { Player, EYE_HEIGHT } from './world/player'
 import { Viewmodel } from './world/viewmodel'
 import { Weapon } from './world/weapon'
-import { gameState, setGameState } from './state'
+import { createAvatar, type Avatar } from './world/avatar'
+import { gameState, setGameState, type RosterEntry } from './state'
+import type { Multiplayer, NetPlayer, NetState } from './net'
+
+export interface MatchSetup {
+  you: string
+  players: NetPlayer[]
+  net: Multiplayer
+}
+
+interface RemotePlayer {
+  info: NetPlayer
+  avatar: Avatar | null
+  heli: Helicopter | null
+  target: NetState | null
+  snapped: boolean
+}
+
+const NET_SEND_INTERVAL = 1 / 15
+const ROSTER_INTERVAL = 0.3
+/** Jumps further than this (respawn, leaving a helicopter) snap instead of gliding across the map. */
+const SNAP_DISTANCE = 25
+const TEAM_NAME: Record<Team, string> = { blue: 'BLUE', red: 'RED' }
+const other = (team: Team): Team => (team === 'blue' ? 'red' : 'blue')
+
+function lerpAngle(from: number, to: number, t: number) {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from))
+  return from + delta * t
+}
 
 export class BattlefieldGame {
+  readonly team: Team
+  private remotes = new Map<string, RemotePlayer>()
+  private netTimer = 0
+  private rosterTimer = 0
+  private lastRosterJson = ''
+  private captureSent = false
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
@@ -34,7 +68,7 @@ export class BattlefieldGame {
   }
   private mouse = { shooting: false }
   private inHeli = false
-  private carryTarget: 'red' | null = null
+  private carryTarget: Team | null = null
   private clock = new THREE.Clock()
   private disposed = false
   private targetList: THREE.Object3D[] = []
@@ -44,7 +78,9 @@ export class BattlefieldGame {
   private lastHeliYaw = 0
   private heliCameraMode: 'cockpit' | 'chase' = 'cockpit'
 
-  constructor(private container: HTMLElement) {
+  constructor(private container: HTMLElement, private match: MatchSetup) {
+    this.team = match.players.find((p) => p.id === match.you)?.team ?? 'blue'
+
     // Renderer
     this.renderer = new THREE.WebGLRenderer({ antialias: true })
     this.renderer.setSize(container.clientWidth, container.clientHeight)
@@ -76,27 +112,33 @@ export class BattlefieldGame {
     this.scene.add(createBushes(worldCircles))
     this.scene.add(createClouds())
 
-    // Bases
-    const ourPos = new THREE.Vector3(-380, 0, -380)
-    const enemyPos = new THREE.Vector3(380, 0, 380)
-    this.ourBase = createBase('blue', ourPos)
-    this.enemyBase = createBase('red', enemyPos)
-    this.scene.add(this.ourBase.group)
-    this.scene.add(this.enemyBase.group)
-    this.flags = { blue: this.ourBase, red: this.enemyBase }
+    // Bases: blue in the south-west corner, red in the north-east; "ours" depends on the team
+    const blueBase = createBase('blue', new THREE.Vector3(-380, 0, -380))
+    const redBase = createBase('red', new THREE.Vector3(380, 0, 380))
+    this.flags = { blue: blueBase, red: redBase }
+    this.ourBase = this.flags[this.team]
+    this.enemyBase = this.flags[other(this.team)]
+    this.scene.add(blueBase.group)
+    this.scene.add(redBase.group)
+    const ourPos = this.ourBase.group.position
 
-    // Helicopter parked on OUR base pad
+    // Helicopter parked on OUR base pad, nose toward the enemy
     this.heliPadWorld = new THREE.Vector3(ourPos.x + 20, 0, ourPos.z - 18)
     this.heliPadWorld.y = heightAt(this.heliPadWorld.x, this.heliPadWorld.z) + 0.05
+    this.heliYaw = this.team === 'blue' ? Math.PI * 0.25 : Math.PI * 1.25
     this.heli = createHelicopter(this.heliPadWorld, () => {
       setGameState({ message: 'Helicopter ready at your base helipad. Press [E] near it to board.' })
     })
+    this.heli.object.rotation.y = this.heliYaw
     this.scene.add(this.heli.object)
 
-    // Player
+    // Player: spawn just outside our gate (blue gate faces +X, red gate faces -X), teammates side by side
     this.player = new Player(this.camera)
-    // Spawn just outside our gate, facing the open battlefield
-    this.player.spawn(new THREE.Vector3(ourPos.x + 56, 0, ourPos.z + 8))
+    const mates = match.players.filter((p) => p.team === this.team)
+    const slot = Math.max(0, mates.findIndex((p) => p.id === match.you))
+    const gateDir = this.team === 'blue' ? 1 : -1
+    const spread = (slot - (mates.length - 1) / 2) * 4
+    this.player.spawn(new THREE.Vector3(ourPos.x + gateDir * 56, 0, ourPos.z + gateDir * 8 + spread))
 
     // Colliders from both bases for player/wall collision
     const colliders = [...this.ourBase.colliders, ...this.enemyBase.colliders]
@@ -118,7 +160,179 @@ export class BattlefieldGame {
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
 
+    for (const player of match.players) this.upsertPlayer(player)
+    const enemy = TEAM_NAME[other(this.team)]
+    setGameState({
+      team: this.team,
+      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} flag and bring it to your ${TEAM_NAME[this.team]} flagpole. [E] to interact.`,
+    })
+    this.publishRoster()
+
     this.bindEvents()
+  }
+
+  upsertPlayer(player: NetPlayer) {
+    if (player.id === this.match.you) return
+    let remote = this.remotes.get(player.id)
+    if (!remote) {
+      remote = { info: player, avatar: null, heli: null, target: null, snapped: false }
+      this.remotes.set(player.id, remote)
+    }
+    if (remote.avatar && remote.info.team !== player.team) {
+      this.scene.remove(remote.avatar.group)
+      remote.avatar.dispose()
+      remote.avatar = null
+    }
+    remote.info = { ...player }
+    if (!remote.avatar && player.team) {
+      remote.avatar = createAvatar(player.displayName, player.team)
+      remote.avatar.group.visible = false
+      this.scene.add(remote.avatar.group)
+    }
+    if (player.state) this.applyRemoteState(player.id, player.state)
+    if (!player.online) this.removePlayer(player.id)
+  }
+
+  /** After a reconnect the server's roster is authoritative: anyone missing is offline. */
+  syncRoster(players: NetPlayer[]) {
+    for (const player of players) this.upsertPlayer(player)
+    const known = new Set(players.map((p) => p.id))
+    for (const id of this.remotes.keys()) if (!known.has(id)) this.removePlayer(id)
+  }
+
+  removePlayer(id: string) {
+    const remote = this.remotes.get(id)
+    if (!remote) return
+    remote.info = { ...remote.info, online: false }
+    remote.target = null
+    remote.snapped = false
+    if (remote.avatar) remote.avatar.group.visible = false
+    if (remote.heli) remote.heli.object.visible = false
+  }
+
+  applyRemoteState(id: string, state: NetState) {
+    const remote = this.remotes.get(id)
+    if (!remote) return
+    remote.info.online = true
+    remote.target = state
+  }
+
+  endMatch(winner: Team) {
+    this.carryTarget = null
+    this.mouse.shooting = false
+    for (const key of Object.keys(this.input) as Array<keyof typeof this.input>) this.input[key] = false
+    const won = winner === this.team
+    if (won) this.score += 1
+    setGameState({
+      finished: true,
+      winner,
+      carryingFlag: false,
+      score: this.score,
+      message: won
+        ? `VICTORY! The ${TEAM_NAME[winner]} team captured the enemy flag.`
+        : `DEFEAT. The ${TEAM_NAME[winner]} team captured your flag.`,
+    })
+    document.exitPointerLock?.()
+  }
+
+  private sendNetState() {
+    const p = this.player.position
+    const heli = this.heli.object
+    this.match.net.sendState({
+      p: [p.x, p.y, p.z],
+      yaw: this.player.yaw,
+      pitch: this.player.pitch,
+      heli: this.inHeli
+        ? { p: [heli.position.x, heli.position.y, heli.position.z], r: [heli.rotation.x, heli.rotation.y, heli.rotation.z], rpm: this.heli.getRotorSpeed() }
+        : null,
+      flag: this.carryTarget !== null,
+      hp: gameState.health,
+    })
+  }
+
+  private updateRemotes(dt: number, time: number) {
+    const k = 1 - Math.exp(-dt * 12)
+    for (const remote of this.remotes.values()) {
+      const s = remote.target
+      if (!remote.info.online || !s || !remote.avatar) continue
+      const avatar = remote.avatar.group
+      const feet = new THREE.Vector3(s.p[0], s.p[1] - EYE_HEIGHT, s.p[2])
+      if (!remote.snapped || avatar.position.distanceToSquared(feet) > SNAP_DISTANCE ** 2) {
+        avatar.position.copy(feet)
+        avatar.rotation.y = s.yaw
+        remote.snapped = true
+      } else {
+        avatar.position.lerp(feet, k)
+        avatar.rotation.y = lerpAngle(avatar.rotation.y, s.yaw, k)
+      }
+      avatar.visible = !s.heli
+      remote.avatar.carriedFlag.visible = s.flag
+
+      if (s.heli) {
+        if (!remote.heli) {
+          remote.heli = createHelicopter(new THREE.Vector3(...s.heli.p))
+          remote.heli.setParked(false)
+          remote.heli.object.rotation.set(...s.heli.r)
+          this.scene.add(remote.heli.object)
+        }
+        const obj = remote.heli.object
+        obj.visible = true
+        obj.position.lerp(new THREE.Vector3(...s.heli.p), k)
+        obj.rotation.set(
+          THREE.MathUtils.lerp(obj.rotation.x, s.heli.r[0], k),
+          lerpAngle(obj.rotation.y, s.heli.r[1], k),
+          THREE.MathUtils.lerp(obj.rotation.z, s.heli.r[2], k),
+        )
+        remote.heli.setRotorTarget(s.heli.rpm)
+        remote.heli.update(dt, time)
+      } else if (remote.heli) {
+        remote.heli.object.visible = false
+      }
+    }
+  }
+
+  /** A flag is "taken" while anyone — us or a remote player — carries it. */
+  private flagCarried(flagTeam: Team) {
+    if (this.carryTarget === flagTeam) return true
+    for (const remote of this.remotes.values()) {
+      if (remote.info.online && remote.target?.flag && remote.info.team === other(flagTeam)) return true
+    }
+    return false
+  }
+
+  private updateFlagVisibility() {
+    for (const team of ['blue', 'red'] as const) {
+      const base = this.flags[team]
+      const carried = this.flagCarried(team)
+      base.flagState.carried = carried
+      base.flagCloth.visible = !carried
+      base.flagTip.visible = !carried
+    }
+  }
+
+  private publishRoster() {
+    const me = this.match.players.find((p) => p.id === this.match.you)
+    const entries: RosterEntry[] = [{
+      id: this.match.you,
+      name: me?.displayName ?? 'You',
+      team: this.team,
+      status: this.carryTarget ? 'carrying flag' : this.inHeli ? 'flying' : 'on foot',
+      you: true,
+    }]
+    for (const remote of this.remotes.values()) {
+      const s = remote.target
+      entries.push({
+        id: remote.info.id,
+        name: remote.info.displayName,
+        team: remote.info.team,
+        status: !remote.info.online ? 'offline' : s?.flag ? 'carrying flag' : s?.heli ? 'flying' : 'on foot',
+        you: false,
+      })
+    }
+    const json = JSON.stringify(entries)
+    if (json === this.lastRosterJson) return
+    this.lastRosterJson = json
+    setGameState({ players: entries })
   }
 
   private bindEvents() {
@@ -379,18 +593,16 @@ export class BattlefieldGame {
       return
     }
 
-    // Pickup: proximity to the enemy flagpole base (reachable on foot)
+    // Pickup: proximity to the enemy flagpole base (reachable on foot), unless a teammate already has it
+    const enemyTeam = other(this.team)
     const flagLocal = new THREE.Vector3(-12, 0, 0)
     const enemyFlagWorld = this.enemyBase.group.localToWorld(flagLocal.clone())
     const d = this.player.position.distanceTo(enemyFlagWorld)
-    if (d < 7) {
-      this.carryTarget = 'red'
-      this.enemyBase.flagState.carried = true
-      this.enemyBase.flagCloth.visible = false
-      this.enemyBase.flagTip.visible = false
+    if (d < 7 && !this.flagCarried(enemyTeam)) {
+      this.carryTarget = enemyTeam
       setGameState({
         carryingFlag: true,
-        message: 'Enemy flag taken! Bring it to the BLUE flagpole.',
+        message: `${TEAM_NAME[enemyTeam]} flag taken! Bring it to the ${TEAM_NAME[this.team]} flagpole.`,
       })
     }
 
@@ -406,28 +618,16 @@ export class BattlefieldGame {
     if (!this.carryTarget) return
     const ourFlagWorld = this.ourBase.group.localToWorld(new THREE.Vector3(-12, 0, 0))
     const d = this.player.position.distanceTo(ourFlagWorld)
-    if (d < 9) {
-      this.carryTarget = null
-      this.enemyBase.flagState.carried = false
-      this.enemyBase.flagCloth.visible = true
-      this.enemyBase.flagTip.visible = true
-      const score = 1
-      this.score += score
-      setGameState({
-        carryingFlag: false,
-        score: this.score,
-        finished: true,
-        message: 'VICTORY! You stole the enemy flag and brought it back to your base.',
-      })
-      this.mouse.shooting = false
-      this.input.forward = false
-      this.input.back = false
-      this.input.left = false
-      this.input.right = false
-      this.input.sprint = false
-      // respawn flag (it never actually left, we hid it while carried)
-      this.flags.red.flagState.carried = false
+    if (d >= 9) {
+      this.captureSent = false
+      return
     }
+    if (this.captureSent) return
+    // The server confirms the capture and ends the match for every player
+    this.captureSent = true
+    this.sendNetState()
+    this.match.net.sendCapture()
+    setGameState({ message: 'Flag delivered — confirming capture…' })
   }
 
   private score = 0
@@ -452,7 +652,7 @@ export class BattlefieldGame {
       ammo: this.weapon.ammo,
       maxAmmo: this.weapon.def.magSize,
       reloading: this.weapon.reloading,
-      carryingFlag: this.carryTarget === 'red',
+      carryingFlag: this.carryTarget !== null,
     })
   }
 
@@ -463,6 +663,14 @@ export class BattlefieldGame {
       const dt = Math.min(this.clock.getDelta(), 0.05)
       const time = this.clock.elapsedTime
 
+      this.updateRemotes(dt, time)
+      this.updateFlagVisibility()
+      this.rosterTimer += dt
+      if (this.rosterTimer >= ROSTER_INTERVAL) {
+        this.rosterTimer = 0
+        this.publishRoster()
+      }
+
       if (gameState.finished) {
         this.mouse.shooting = false
         this.renderer.render(this.scene, this.camera)
@@ -472,6 +680,12 @@ export class BattlefieldGame {
       this.updatePlayer(dt)
       this.updateHelicopter(dt, time)
       this.updateFlagsAndCapture()
+
+      this.netTimer += dt
+      if (this.netTimer >= NET_SEND_INTERVAL) {
+        this.netTimer = 0
+        this.sendNetState()
+      }
 
       this.weapon.tick(dt)
       const cockpitCombat = this.inHeli && this.heliCameraMode === 'cockpit'
@@ -503,6 +717,7 @@ export class BattlefieldGame {
     this.disposed = true
     for (const [t, k, fn] of this.boundHandlers) t.removeEventListener(k, fn)
     this.boundHandlers = []
+    for (const remote of this.remotes.values()) remote.avatar?.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }

@@ -13,6 +13,8 @@ export interface Helicopter {
   update: (dt: number, time: number) => void
   /** Space = spool up, Shift = spool down (viewer-style RPM control). */
   updateRotorInput: (spoolUp: boolean, spoolDown: boolean, dt: number) => void
+  /** Drive the rotor from a known RPM (remote players' helicopters). */
+  setRotorTarget: (rpm: number) => void
   setParked: (parked: boolean) => void
   setDoorOpen: (open: boolean) => void
   parked: boolean
@@ -117,6 +119,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
         0,
         state.maxRotorSpeed,
       )
+    },
+
+    setRotorTarget(rpm: number) {
+      state.targetRotorSpeed = THREE.MathUtils.clamp(rpm, 0, state.maxRotorSpeed)
     },
 
     setParked(p: boolean) {

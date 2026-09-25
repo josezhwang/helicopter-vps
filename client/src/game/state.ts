@@ -1,3 +1,15 @@
+import type { Team } from './world/bases'
+
+export type PlayerStatus = 'on foot' | 'flying' | 'carrying flag' | 'offline'
+
+export interface RosterEntry {
+  id: string
+  name: string
+  team: Team | null
+  status: PlayerStatus
+  you: boolean
+}
+
 export interface GameState {
   ammo: number
   maxAmmo: number
@@ -14,8 +26,12 @@ export interface GameState {
   health: number
   weaponName: string
   weaponPower: number
-  /** True once the flag is captured: victory screen shows. */
+  /** True once a flag is captured by either team: result screen shows. */
   finished: boolean
+  team: Team | null
+  players: RosterEntry[]
+  winner: Team | null
+  connected: boolean
 }
 
 type Listener = (s: GameState) => void
@@ -34,27 +50,39 @@ const INITIAL_STATE: GameState = {
   weaponName: 'Primary Handgun',
   weaponPower: 5,
   finished: false,
-  message: 'Steal the RED flag from the enemy base and bring it to your BLUE base to WIN. [E] to interact.',
+  message: 'Connecting to the battle…',
+  team: null,
+  players: [],
+  winner: null,
+  connected: false,
 }
 
 export const gameState: GameState = { ...INITIAL_STATE }
 
 const listeners = new Set<Listener>()
 
+const notify = () => {
+  const snapshot = { ...gameState }
+  listeners.forEach((fn) => fn(snapshot))
+}
+
 export function resetGameState() {
   Object.assign(gameState, INITIAL_STATE)
-  listeners.forEach((fn) => fn(gameState))
+  notify()
 }
 
 export function subscribeGameState(fn: Listener): () => void {
   listeners.add(fn)
-  fn(gameState)
+  fn({ ...gameState })
   return () => {
     listeners.delete(fn)
   }
 }
 
 export function setGameState(patch: Partial<GameState>) {
+  // Called every frame; only re-render the HUD when something actually changed
+  const changed = (Object.keys(patch) as Array<keyof GameState>).some((key) => !Object.is(gameState[key], patch[key]))
+  if (!changed) return
   Object.assign(gameState, patch)
-  listeners.forEach((fn) => fn(gameState))
+  notify()
 }

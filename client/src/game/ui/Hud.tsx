@@ -1,5 +1,34 @@
 import { useEffect, useState } from 'react'
-import { subscribeGameState, type GameState } from '../state'
+import { subscribeGameState, type GameState, type RosterEntry } from '../state'
+
+const TEAM_CSS = { red: '#ff7a6e', blue: '#7fb6ff' } as const
+const panel = {
+  padding: '10px 14px',
+  background: 'rgba(6, 10, 18, 0.65)',
+  border: '1px solid rgba(120, 180, 255, 0.35)',
+  borderRadius: 8,
+  color: '#cfe6ff',
+  fontSize: 14,
+  lineHeight: 1.5,
+} as const
+
+function Roster({ players }: { players: RosterEntry[] }) {
+  return (
+    <div style={{ ...panel, position: 'absolute', right: 16, top: 16, minWidth: 230 }}>
+      {(['red', 'blue'] as const).map((team) => (
+        <div key={team} style={{ marginBottom: team === 'red' ? 8 : 0 }}>
+          <div style={{ color: TEAM_CSS[team], fontWeight: 700 }}>{team.toUpperCase()} TEAM</div>
+          {players.filter((p) => p.team === team).map((p) => (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, opacity: p.status === 'offline' ? 0.5 : 1 }}>
+              <span>{p.name}{p.you ? ' (you)' : ''}</span>
+              <span style={{ color: p.status === 'carrying flag' ? '#ffd98f' : '#9fb4c8' }}>{p.status === 'carrying flag' ? '🚩 flag' : p.status}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 function Crosshair() {
   return (
@@ -28,10 +57,24 @@ export function Hud() {
   useEffect(() => subscribeGameState(setState), [])
 
   if (!state) return null
+  const team = state.team
+  const won = state.winner !== null && state.winner === team
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'monospace' }}>
       <Crosshair />
+
+      {team && (
+        <div style={{ ...panel, position: 'absolute', left: 16, top: 16, color: TEAM_CSS[team], fontSize: 18, fontWeight: 700 }}>
+          {team.toUpperCase()} TEAM
+        </div>
+      )}
+      <Roster players={state.players} />
+      {!state.connected && !state.finished && (
+        <div style={{ ...panel, position: 'absolute', left: '50%', top: 64, transform: 'translateX(-50%)', color: '#ffd98f' }}>
+          Connection lost — reconnecting…
+        </div>
+      )}
 
       <div
         style={{
@@ -87,7 +130,7 @@ export function Hud() {
       >
         <div style={{ fontSize: 18, color: '#ffd98f' }}>SCORE {state.score}</div>
         <div style={{ opacity: 0.85 }}>
-          {state.carryingFlag ? '🚩 CARRYING ENEMY FLAG — return to BLUE base!' : 'Capture the enemy flag'}
+          {state.carryingFlag ? `🚩 CARRYING ENEMY FLAG — return to ${(team ?? 'blue').toUpperCase()} base!` : 'Capture the enemy flag'}
         </div>
         {state.nearHelicopter && !state.inHelicopter && <div style={{ color: '#8fd0ff' }}>[E] Board helicopter</div>}
       </div>
@@ -125,10 +168,11 @@ export function Hud() {
           }}
         >
           <div style={{ display: 'grid', justifyItems: 'center', gap: 18 }}>
-            <div style={{ fontSize: 34, fontWeight: 700, letterSpacing: 1.5 }}>VICTORY!</div>
+            <div style={{ fontSize: 34, fontWeight: 700, letterSpacing: 1.5 }}>{won ? 'VICTORY!' : 'DEFEAT'}</div>
+            {state.winner && <div style={{ fontSize: 18, color: TEAM_CSS[state.winner] }}>{state.winner.toUpperCase()} TEAM WINS</div>}
             <button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={() => { window.location.hash = '' }}
               style={{
                 padding: '10px 24px',
                 border: '1px solid rgba(143, 208, 255, 0.7)',
@@ -140,7 +184,7 @@ export function Hud() {
                 pointerEvents: 'auto',
               }}
             >
-              RETRY
+              BACK TO OPERATIONS
             </button>
           </div>
         </div>
