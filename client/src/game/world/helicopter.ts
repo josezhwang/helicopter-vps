@@ -14,6 +14,7 @@ export interface Helicopter {
   /** Space = spool up, Shift = spool down (viewer-style RPM control). */
   updateRotorInput: (spoolUp: boolean, spoolDown: boolean, dt: number) => void
   setParked: (parked: boolean) => void
+  setDoorOpen: (open: boolean) => void
   parked: boolean
   /** 0..MAX_ROTOR_RPM, matches the classic RPM HUD readout (x10 => up to 1000). */
   getRotorSpeed: () => number
@@ -51,6 +52,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
   // Synthesized rotors, only if the model ever ships without named ones
   let fallbackMainRotor: THREE.Object3D | null = null
   let fallbackTailRotor: THREE.Object3D | null = null
+  const doorNodes: THREE.Object3D[] = []
+  const doorBaseRotations = new Map<THREE.Object3D, number>()
+  let doorProgress = 0
+  let doorTarget = 0
 
   const addFallbackModel = () => {
     if (object.children.length > 0) return
@@ -123,6 +128,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       }
     },
 
+    setDoorOpen(open: boolean) {
+      doorTarget = open ? 1 : 0
+    },
+
     update(dt: number, time: number) {
       // Smooth rotor acceleration toward target — runs ALWAYS so the
       // propeller winds down after dismount, not just while piloted.
@@ -142,6 +151,12 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       if (tailRotor) tailRotor.rotation.x += spin * 1.5 * dt
       if (fallbackMainRotor) fallbackMainRotor.rotation.y += (spin / 100) * 40 * dt
       if (fallbackTailRotor) fallbackTailRotor.rotation.x += (spin / 100) * 56 * dt
+
+      doorProgress = THREE.MathUtils.lerp(doorProgress, doorTarget, Math.min(1, dt * 8))
+      for (const door of doorNodes) {
+        const baseY = doorBaseRotations.get(door) ?? door.rotation.y
+        door.rotation.y = baseY - doorProgress * 1.1
+      }
 
       if (state.parked) {
         object.position.y = padWorldPos.y + Math.sin(time * 1.2) * 0.05
@@ -178,6 +193,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
         if (name.includes('rotor') || name.includes('propeller')) {
           if (name.includes('main')) mainRotor = node
           else if (name.includes('rear') || name.includes('tail')) tailRotor = node
+        }
+        if (name.includes('doors')) {
+          doorNodes.push(node)
+          doorBaseRotations.set(node, node.rotation.y)
         }
       })
 

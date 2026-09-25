@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { createTerrain, createWater, createSkyAndLights, heightAt } from './world/terrain'
 import { createBase, animateFlag, type BaseObjects } from './world/bases'
 import { createForest, createRocks, createBushes, createClouds } from './world/nature'
-import { createHelicopter, type Helicopter } from './world/helicopter'
+import { createHelicopter, HELI_SEAT_OFFSET, type Helicopter } from './world/helicopter'
 import { Player } from './world/player'
 import { Viewmodel } from './world/viewmodel'
 import { Weapon } from './world/weapon'
@@ -40,6 +40,7 @@ export class BattlefieldGame {
   private targetList: THREE.Object3D[] = []
   private boundHandlers: Array<[EventTarget, string, EventListener]> = []
   private lastShotCount = 0
+  private boarding = false
 
   constructor(private container: HTMLElement) {
     // Renderer
@@ -211,6 +212,7 @@ export class BattlefieldGame {
   }
 
   private toggleHelicopter() {
+    if (this.boarding) return
     if (this.inHeli) {
       // Dismount: place player beside heli on the ground
       this.inHeli = false
@@ -227,12 +229,26 @@ export class BattlefieldGame {
     const eye = this.player.position
     const heliPos = this.heli.object.position
     const dist = eye.distanceTo(heliPos)
-    if (dist < 14) {
-      this.inHeli = true
-      this.heli.setParked(false)
-      this.heliFlightAltitude = heliPos.y
-      setGameState({ inHelicopter: true, message: 'Press SPACE to spin up the rotor. W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, E to exit.' })
-    }
+    if (dist < 10) void this.boardHelicopter()
+  }
+
+  private async boardHelicopter() {
+    this.boarding = true
+    this.heli.setDoorOpen(true)
+    setGameState({ message: 'Opening helicopter door...' })
+    await new Promise((resolve) => window.setTimeout(resolve, 450))
+
+    const seat = this.heli.object.localToWorld(HELI_SEAT_OFFSET.clone())
+    this.player.position.copy(seat)
+    this.player.velocity.set(0, 0, 0)
+    this.inHeli = true
+    this.heli.setParked(false)
+    this.heliFlightAltitude = this.heli.object.position.y
+    setGameState({ inHelicopter: true, message: 'Press SPACE to spin up the rotor. W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, E to exit.' })
+
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+    this.heli.setDoorOpen(false)
+    this.boarding = false
   }
 
   private heliFlightAltitude = 0
@@ -394,7 +410,7 @@ export class BattlefieldGame {
     this.player.setExtraCircle(
       this.heli.object.position.x,
       this.heli.object.position.z,
-      this.inHeli ? 0 : 7.5,
+      this.inHeli ? 0 : 6,
     )
     if (this.inHeli) {
       setGameState({ nearHelicopter: false })
