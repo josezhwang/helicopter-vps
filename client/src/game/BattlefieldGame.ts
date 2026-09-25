@@ -87,7 +87,7 @@ export class BattlefieldGame {
 
     // Helicopter parked on OUR base pad
     this.heliPadWorld = new THREE.Vector3(ourPos.x + 20, 0, ourPos.z - 18)
-    this.heliPadWorld.y = heightAt(this.heliPadWorld.x, this.heliPadWorld.z) + 0.6
+    this.heliPadWorld.y = heightAt(this.heliPadWorld.x, this.heliPadWorld.z) + 0.05
     this.heli = createHelicopter(this.heliPadWorld, () => {
       setGameState({ message: 'Helicopter ready at your base helipad. Press [E] near it to board.' })
     })
@@ -234,7 +234,7 @@ export class BattlefieldGame {
     const eye = this.player.position
     const heliPos = this.heli.object.position
     const dist = eye.distanceTo(heliPos)
-    if (dist < 10) void this.boardHelicopter()
+    if (dist < 8) void this.boardHelicopter()
   }
 
   private async boardHelicopter() {
@@ -436,7 +436,7 @@ export class BattlefieldGame {
     this.player.setExtraCircle(
       this.heli.object.position.x,
       this.heli.object.position.z,
-      this.inHeli ? 0 : 6,
+      this.inHeli ? 0 : 3.8,
     )
     if (this.inHeli) {
       setGameState({ nearHelicopter: false })
