@@ -1,18 +1,35 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg'
 
+function describe(connectionString: string) {
+  try {
+    const url = new URL(connectionString)
+    return `${url.hostname}:${url.port || 5432}${url.pathname} as ${decodeURIComponent(url.username)}`
+  } catch {
+    return 'DATABASE_URL (unparseable)'
+  }
+}
+
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private readonly pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    host: process.env.PGHOST,
-    port: process.env.PGPORT ? Number(process.env.PGPORT) : 5432,
-    database: process.env.PGDATABASE,
-    user: process.env.PGUSER,
-    password: process.env.PGPASSWORD,
+    connectionTimeoutMillis: 10_000,
+    keepAlive: true,
   })
 
+  constructor() {
+    // A remote server dropping an idle connection must not crash the API
+    this.pool.on('error', (error) => console.error('PostgreSQL idle connection error:', error.message))
+  }
+
   async onModuleInit() {
+    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL must be set in server/.env (see server/.env.example)')
+    try {
+      await this.pool.query('SELECT 1')
+    } catch (error) {
+      throw new Error(`Could not connect to PostgreSQL at ${describe(process.env.DATABASE_URL)}: ${(error as Error).message}`)
+    }
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS "user" (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
