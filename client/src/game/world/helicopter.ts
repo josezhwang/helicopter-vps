@@ -132,7 +132,7 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       doorTarget = open ? 1 : 0
     },
 
-    update(dt: number, time: number) {
+    update(dt: number, _time: number) {
       // Smooth rotor acceleration toward target — runs ALWAYS so the
       // propeller winds down after dismount, not just while piloted.
       // (Same lerp factor as the viewer: 4 * delta)
@@ -159,8 +159,7 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       }
 
       if (state.parked) {
-        const landingY = padWorldPos.y + Math.sin(time * 1.2) * 0.05
-        object.position.y = THREE.MathUtils.lerp(object.position.y, landingY, Math.min(1, dt * 1.6))
+        object.position.y = THREE.MathUtils.lerp(object.position.y, padWorldPos.y, Math.min(1, dt * 1.6))
         object.rotation.x = THREE.MathUtils.lerp(object.rotation.x, 0, Math.min(1, dt * 2.5))
         object.rotation.z = THREE.MathUtils.lerp(object.rotation.z, 0, Math.min(1, dt * 2.5))
       }
