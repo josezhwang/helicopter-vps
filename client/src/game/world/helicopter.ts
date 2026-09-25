@@ -165,7 +165,9 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       }
 
       if (state.parked) {
-        object.position.y = THREE.MathUtils.lerp(object.position.y, padWorldPos.y, Math.min(1, dt * 1.6))
+        // Settle on the ground wherever it was left, not back at pad height
+        const groundY = heightAt(object.position.x, object.position.z) + 0.05
+        object.position.y = THREE.MathUtils.lerp(object.position.y, groundY, Math.min(1, dt * 1.6))
         object.rotation.x = THREE.MathUtils.lerp(object.rotation.x, 0, Math.min(1, dt * 2.5))
         object.rotation.z = THREE.MathUtils.lerp(object.rotation.z, 0, Math.min(1, dt * 2.5))
       }

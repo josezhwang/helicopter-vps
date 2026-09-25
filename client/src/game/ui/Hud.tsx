@@ -12,6 +12,22 @@ const panel = {
   lineHeight: 1.5,
 } as const
 
+const FLASH_CSS = `
+@keyframes hud-hitmarker { from { opacity: 1; transform: translate(-50%, -50%) scale(1.25) } to { opacity: 0; transform: translate(-50%, -50%) scale(1) } }
+@keyframes hud-damage { from { opacity: 0.55 } to { opacity: 0 } }
+`
+
+function HitMarker() {
+  const arm = (rotate: number) => (
+    <div style={{ position: 'absolute', left: 13, top: 4, width: 2, height: 8, background: '#ff5a4e', transform: `rotate(${rotate}deg)`, transformOrigin: '1px 10px' }} />
+  )
+  return (
+    <div style={{ position: 'absolute', left: '50%', top: '50%', width: 28, height: 28, animation: 'hud-hitmarker 260ms ease-out forwards', pointerEvents: 'none' }}>
+      {arm(45)}{arm(135)}{arm(225)}{arm(315)}
+    </div>
+  )
+}
+
 function Roster({ players }: { players: RosterEntry[] }) {
   return (
     <div style={{ ...panel, position: 'absolute', right: 16, top: 16, minWidth: 230 }}>
@@ -21,7 +37,9 @@ function Roster({ players }: { players: RosterEntry[] }) {
           {players.filter((p) => p.team === team).map((p) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, opacity: p.status === 'offline' ? 0.5 : 1 }}>
               <span>{p.name}{p.you ? ' (you)' : ''}</span>
-              <span style={{ color: p.status === 'carrying flag' ? '#ffd98f' : '#9fb4c8' }}>{p.status === 'carrying flag' ? '🚩 flag' : p.status}</span>
+              <span style={{ color: p.status === 'dead' ? '#ef6b66' : p.status === 'carrying flag' ? '#ffd98f' : '#9fb4c8' }}>
+                {p.status === 'carrying flag' ? '🚩 flag' : p.status}{p.status !== 'dead' && p.status !== 'offline' ? ` · ${Math.round(p.hp)}hp` : ''}
+              </span>
             </div>
           ))}
         </div>
@@ -62,7 +80,17 @@ export function Hud() {
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'monospace' }}>
-      <Crosshair />
+      <style>{FLASH_CSS}</style>
+      {!state.dead && <Crosshair />}
+      {state.hitsLanded > 0 && <HitMarker key={`hit-${state.hitsLanded}`} />}
+      {state.damageTaken > 0 && (
+        <div key={`dmg-${state.damageTaken}`} style={{ position: 'absolute', inset: 0, boxShadow: 'inset 0 0 160px 40px rgba(220, 30, 20, 0.9)', animation: 'hud-damage 450ms ease-out forwards' }} />
+      )}
+      {state.dead && !state.finished && (
+        <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'rgba(60, 5, 5, 0.45)', color: '#ffd6d2', fontSize: 30, fontWeight: 700, letterSpacing: 1.5, textShadow: '0 0 16px rgba(255, 60, 40, 0.8)' }}>
+          ELIMINATED — RESPAWNING…
+        </div>
+      )}
 
       {team && (
         <div style={{ ...panel, position: 'absolute', left: 16, top: 16, color: TEAM_CSS[team], fontSize: 18, fontWeight: 700 }}>

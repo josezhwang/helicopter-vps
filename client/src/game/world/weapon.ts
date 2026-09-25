@@ -51,11 +51,12 @@ export class Weapon {
     return this.shotsFired
   }
 
-  tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]) {
+  /** Returns the object the shot hit, or null when nothing fired or nothing was hit. */
+  tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]): THREE.Object3D | null {
     this.flashTimer -= dt
     if (this.flashTimer <= 0) this.flashLight.intensity = 0
 
-    if (!input.shooting || this.reloading || this.cooldown > 0 || this.ammo <= 0) return
+    if (!input.shooting || this.reloading || this.cooldown > 0 || this.ammo <= 0) return null
 
     this.cooldown = this.def.fireRate
     this.ammo--
@@ -95,6 +96,7 @@ export class Weapon {
       }
       requestAnimationFrame(fade)
     }
+    return hits[0]?.object ?? null
   }
 
   reload() {

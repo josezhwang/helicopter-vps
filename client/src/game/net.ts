@@ -19,6 +19,8 @@ export interface NetPlayer {
   team: Team | null
   online: boolean
   state: NetState | null
+  hp: number
+  dead: boolean
 }
 
 export interface NetHandlers {
@@ -27,6 +29,9 @@ export interface NetHandlers {
   onLeave: (id: string) => void
   onState: (id: string, state: NetState) => void
   onEnd: (winner: Team, by: string) => void
+  onHp: (id: string, hp: number, by: string) => void
+  onKilled: (id: string, by: string) => void
+  onRespawn: (id: string) => void
   onError: (message: string) => void
   onConnection: (connected: boolean) => void
 }
@@ -60,6 +65,9 @@ export class Multiplayer {
         case 'leave': this.handlers.onLeave(String(message.id)); break
         case 'state': this.handlers.onState(String(message.id), message.s as NetState); break
         case 'end': this.handlers.onEnd(message.winner as Team, String(message.by)); break
+        case 'hp': this.handlers.onHp(String(message.id), Number(message.hp), String(message.by)); break
+        case 'killed': this.handlers.onKilled(String(message.id), String(message.by)); break
+        case 'respawn': this.handlers.onRespawn(String(message.id)); break
         case 'error':
           this.fatal = true
           this.handlers.onError(String(message.message))
@@ -80,6 +88,10 @@ export class Multiplayer {
 
   sendState(state: NetState) {
     this.send({ type: 'state', s: state })
+  }
+
+  sendHit(target: string, weapon: string) {
+    this.send({ type: 'hit', target, weapon })
   }
 
   sendCapture() {

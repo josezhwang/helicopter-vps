@@ -65,6 +65,8 @@ export function createAvatar(name: string, team: Team): Avatar {
 
   const label = nameLabel(name, team)
   label.position.y = 2.55
+  // Bullets pass through name tags (sprite raycasts also need a camera on the raycaster)
+  label.raycast = () => {}
   group.add(label)
 
   return {

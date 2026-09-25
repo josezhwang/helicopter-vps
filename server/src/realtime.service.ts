@@ -25,11 +25,31 @@ interface Connection {
   alive: boolean
 }
 
+/** Survives reconnects so leaving and rejoining can't heal a player. */
+interface Vitals {
+  hp: number
+  dead: boolean
+  lastShotAt: number
+  respawnTimer?: NodeJS.Timeout
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
 // Flagpole world XZ per team; must match the client world layout (bases at ±380, pole at local x = -12)
 const FLAGPOLE: Record<Team, [number, number]> = { blue: [-392, -380], red: [368, 380] }
+const MAX_HP = 100
+const RESPAWN_MS = 5000
+// Mirrors client/src/game/world/weapons.ts; the server never trusts client-sent damage
+const WEAPONS: Record<string, { power: number; fireRate: number; range: number }> = {
+  'primary-handgun': { power: 5, fireRate: 0.09, range: 200 },
+  smg: { power: 9, fireRate: 0.09, range: 220 },
+  'battle-rifle': { power: 18, fireRate: 0.18, range: 320 },
+  magnum: { power: 32, fireRate: 0.55, range: 380 },
+}
+// Positions are up to one network tick stale on each side
+const RANGE_SLACK = 25
+const FIRE_RATE_SLACK = 0.6
 
 const num = (value: unknown, min: number, max: number) => (typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : null)
 
@@ -65,6 +85,7 @@ function parseState(raw: unknown): PlayerState | null {
 export class RealtimeService implements OnModuleDestroy {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 })
   private readonly rooms = new Map<string, Map<string, Connection>>()
+  private readonly vitals = new Map<string, Map<string, Vitals>>()
   private heartbeat?: NodeJS.Timeout
 
   constructor(private readonly auth: AuthService, private readonly roomService: RoomService) {}
@@ -89,6 +110,7 @@ export class RealtimeService implements OnModuleDestroy {
 
   onModuleDestroy() {
     clearInterval(this.heartbeat)
+    for (const roomId of this.vitals.keys()) this.clearVitals(roomId)
     for (const ws of this.wss.clients) ws.terminate()
     this.wss.close()
   }
@@ -122,8 +144,11 @@ export class RealtimeService implements OnModuleDestroy {
         const state = parseState(message.s)
         if (!state) return
         conn.lastStateAt = now
+        state.hp = this.vitalsOf(roomId, conn.userId).hp
         conn.state = state
         this.broadcast(roomId, { type: 'state', id: conn.userId, s: state }, conn.userId)
+      } else if (message.type === 'hit') {
+        this.hit(roomId, conn, message)
       } else if (message.type === 'capture') {
         await this.capture(roomId, conn)
       }
@@ -167,20 +192,65 @@ export class RealtimeService implements OnModuleDestroy {
 
     const players = roster.players.map((player) => {
       const live = room.get(player.id)
-      return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null }
+      const vitals = this.vitalsOf(roomId, player.id)
+      return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null, hp: vitals.hp, dead: vitals.dead }
     })
     this.send(ws, { type: 'welcome', you: user.id, players })
-    this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null } }, user.id)
+    const myVitals = this.vitalsOf(roomId, user.id)
+    this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null, hp: myVitals.hp, dead: myVitals.dead } }, user.id)
     return { roomId, conn }
+  }
+
+  private vitalsOf(roomId: string, userId: string): Vitals {
+    let room = this.vitals.get(roomId)
+    if (!room) this.vitals.set(roomId, (room = new Map()))
+    let vitals = room.get(userId)
+    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0 }))
+    return vitals
+  }
+
+  private clearVitals(roomId: string) {
+    for (const vitals of this.vitals.get(roomId)?.values() ?? []) clearTimeout(vitals.respawnTimer)
+    this.vitals.delete(roomId)
+  }
+
+  private hit(roomId: string, shooter: Connection, message: Record<string, unknown>) {
+    const weapon = WEAPONS[typeof message.weapon === 'string' ? message.weapon : '']
+    const target = typeof message.target === 'string' ? this.rooms.get(roomId)?.get(message.target) : undefined
+    if (!weapon || !target || target.team === shooter.team || !shooter.state || !target.state) return
+    const shooterVitals = this.vitalsOf(roomId, shooter.userId)
+    const targetVitals = this.vitalsOf(roomId, target.userId)
+    if (shooterVitals.dead || targetVitals.dead) return
+
+    const now = Date.now()
+    if (now - shooterVitals.lastShotAt < weapon.fireRate * 1000 * FIRE_RATE_SLACK) return
+    const from = shooter.state.heli?.p ?? shooter.state.p
+    const to = target.state.heli?.p ?? target.state.p
+    if (Math.hypot(from[0] - to[0], from[1] - to[1], from[2] - to[2]) > weapon.range + RANGE_SLACK) return
+    shooterVitals.lastShotAt = now
+
+    targetVitals.hp = Math.max(0, targetVitals.hp - weapon.power)
+    this.broadcast(roomId, { type: 'hp', id: target.userId, hp: targetVitals.hp, by: shooter.userId })
+    if (targetVitals.hp > 0) return
+
+    targetVitals.dead = true
+    target.state.flag = false
+    this.broadcast(roomId, { type: 'killed', id: target.userId, by: shooter.userId })
+    targetVitals.respawnTimer = setTimeout(() => {
+      targetVitals.hp = MAX_HP
+      targetVitals.dead = false
+      this.broadcast(roomId, { type: 'respawn', id: target.userId })
+    }, RESPAWN_MS)
   }
 
   private async capture(roomId: string, conn: Connection) {
     const state = conn.state
-    if (!state?.flag || state.heli) return
+    if (!state?.flag || state.heli || this.vitalsOf(roomId, conn.userId).dead) return
     const [fx, fz] = FLAGPOLE[conn.team]
     if (Math.hypot(state.p[0] - fx, state.p[2] - fz) > CAPTURE_RADIUS) return
     if (!(await this.roomService.finish(roomId))) return
     this.broadcast(roomId, { type: 'end', winner: conn.team, by: conn.userId })
+    this.clearVitals(roomId)
   }
 
   private broadcast(roomId: string, payload: object, exceptUserId?: string) {

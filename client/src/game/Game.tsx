@@ -28,6 +28,9 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
       onLeave: (id) => game?.removePlayer(id),
       onState: (id, state) => game?.applyRemoteState(id, state),
       onEnd: (winner) => game?.endMatch(winner),
+      onHp: (id, hp, by) => game?.applyHp(id, hp, by),
+      onKilled: (id, by) => game?.playerKilled(id, by),
+      onRespawn: (id) => game?.playerRespawned(id),
       onError: (message) => setError(message),
       onConnection: (connected) => setGameState({ connected }),
     })

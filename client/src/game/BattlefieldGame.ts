@@ -19,7 +19,6 @@ export interface MatchSetup {
 interface RemotePlayer {
   info: NetPlayer
   avatar: Avatar | null
-  heli: Helicopter | null
   target: NetState | null
   snapped: boolean
 }
@@ -39,10 +38,17 @@ function lerpAngle(from: number, to: number, t: number) {
 export class BattlefieldGame {
   readonly team: Team
   private remotes = new Map<string, RemotePlayer>()
-  private netTimer = 0
-  private rosterTimer = 0
+  private lastNetSend = 0
+  private lastRosterAt = 0
   private lastRosterJson = ''
   private captureSent = false
+  /** One helicopter per team, visible to everyone; ours is `this.heli`. */
+  private helis!: Record<Team, Helicopter>
+  /** Remote player currently flying each team's helicopter. */
+  private heliPilot: Record<Team, string | null> = { blue: null, red: null }
+  /** Last pose a remote pilot reported, so a landed helicopter rests exactly where they left it. */
+  private heliLastPose: Record<Team, NonNullable<NetState['heli']> | null> = { blue: null, red: null }
+  private dead = false
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
@@ -50,7 +56,6 @@ export class BattlefieldGame {
   private weapon: Weapon
   private viewmodel: Viewmodel
   private heli: Helicopter
-  private heliPadWorld: THREE.Vector3
   private ourBase: BaseObjects
   private enemyBase: BaseObjects
   private flags: { blue: BaseObjects; red: BaseObjects }
@@ -120,25 +125,27 @@ export class BattlefieldGame {
     this.enemyBase = this.flags[other(this.team)]
     this.scene.add(blueBase.group)
     this.scene.add(redBase.group)
-    const ourPos = this.ourBase.group.position
 
-    // Helicopter parked on OUR base pad, nose toward the enemy
-    this.heliPadWorld = new THREE.Vector3(ourPos.x + 20, 0, ourPos.z - 18)
-    this.heliPadWorld.y = heightAt(this.heliPadWorld.x, this.heliPadWorld.z) + 0.05
-    this.heliYaw = this.team === 'blue' ? Math.PI * 0.25 : Math.PI * 1.25
-    this.heli = createHelicopter(this.heliPadWorld, () => {
-      setGameState({ message: 'Helicopter ready at your base helipad. Press [E] near it to board.' })
-    })
-    this.heli.object.rotation.y = this.heliYaw
-    this.scene.add(this.heli.object)
+    // Each team's helicopter parked on its own base pad, nose toward the enemy base
+    const heliYaw = (team: Team) => (team === 'blue' ? Math.PI * 0.25 : Math.PI * 1.25)
+    const makeHeli = (team: Team) => {
+      const base = this.flags[team].group.position
+      const pad = new THREE.Vector3(base.x + 20, 0, base.z - 18)
+      pad.y = heightAt(pad.x, pad.z) + 0.05
+      const heli = createHelicopter(pad, team === this.team
+        ? () => setGameState({ message: 'Helicopter ready at your base helipad. Press [E] near it to board.' })
+        : undefined)
+      heli.object.rotation.y = heliYaw(team)
+      heli.object.userData.heliTeam = team
+      this.scene.add(heli.object)
+      return heli
+    }
+    this.helis = { blue: makeHeli('blue'), red: makeHeli('red') }
+    this.heli = this.helis[this.team]
+    this.heliYaw = heliYaw(this.team)
 
-    // Player: spawn just outside our gate (blue gate faces +X, red gate faces -X), teammates side by side
     this.player = new Player(this.camera)
-    const mates = match.players.filter((p) => p.team === this.team)
-    const slot = Math.max(0, mates.findIndex((p) => p.id === match.you))
-    const gateDir = this.team === 'blue' ? 1 : -1
-    const spread = (slot - (mates.length - 1) / 2) * 4
-    this.player.spawn(new THREE.Vector3(ourPos.x + gateDir * 56, 0, ourPos.z + gateDir * 8 + spread))
+    this.player.spawn(this.spawnPoint())
 
     // Colliders from both bases for player/wall collision
     const colliders = [...this.ourBase.colliders, ...this.enemyBase.colliders]
@@ -154,13 +161,14 @@ export class BattlefieldGame {
     this.viewmodel.loadHandgun()
     this.viewmodel.show('primary-handgun')
 
-    // Raycast targets for shooting: terrain + bases + nature groups + heli
-    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, this.heli.object]
+    // Raycast targets for shooting: terrain + bases + both helicopters (player avatars are added per shot)
+    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, this.helis.blue.object, this.helis.red.object]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
 
     for (const player of match.players) this.upsertPlayer(player)
+    this.applyOwnVitals(match.players)
     const enemy = TEAM_NAME[other(this.team)]
     setGameState({
       team: this.team,
@@ -175,7 +183,7 @@ export class BattlefieldGame {
     if (player.id === this.match.you) return
     let remote = this.remotes.get(player.id)
     if (!remote) {
-      remote = { info: player, avatar: null, heli: null, target: null, snapped: false }
+      remote = { info: player, avatar: null, target: null, snapped: false }
       this.remotes.set(player.id, remote)
     }
     if (remote.avatar && remote.info.team !== player.team) {
@@ -186,6 +194,7 @@ export class BattlefieldGame {
     remote.info = { ...player }
     if (!remote.avatar && player.team) {
       remote.avatar = createAvatar(player.displayName, player.team)
+      remote.avatar.group.userData.playerId = player.id
       remote.avatar.group.visible = false
       this.scene.add(remote.avatar.group)
     }
@@ -196,6 +205,7 @@ export class BattlefieldGame {
   /** After a reconnect the server's roster is authoritative: anyone missing is offline. */
   syncRoster(players: NetPlayer[]) {
     for (const player of players) this.upsertPlayer(player)
+    this.applyOwnVitals(players)
     const known = new Set(players.map((p) => p.id))
     for (const id of this.remotes.keys()) if (!known.has(id)) this.removePlayer(id)
   }
@@ -207,14 +217,138 @@ export class BattlefieldGame {
     remote.target = null
     remote.snapped = false
     if (remote.avatar) remote.avatar.group.visible = false
-    if (remote.heli) remote.heli.object.visible = false
+    this.releaseHeliFrom(id)
   }
 
   applyRemoteState(id: string, state: NetState) {
     const remote = this.remotes.get(id)
     if (!remote) return
     remote.info.online = true
+    remote.info.hp = state.hp
     remote.target = state
+  }
+
+  applyHp(id: string, hp: number, by: string) {
+    if (id === this.match.you) {
+      const took = hp < gameState.health
+      setGameState({ health: hp, damageTaken: gameState.damageTaken + (took ? 1 : 0) })
+      this.publishRoster()
+      return
+    }
+    const remote = this.remotes.get(id)
+    if (remote) remote.info.hp = hp
+    if (by === this.match.you) setGameState({ hitsLanded: gameState.hitsLanded + 1 })
+    this.publishRoster()
+  }
+
+  playerKilled(id: string, by: string) {
+    const killer = this.nameOf(by)
+    if (id === this.match.you) {
+      this.die(killer)
+      return
+    }
+    const remote = this.remotes.get(id)
+    if (!remote) return
+    remote.info.dead = true
+    remote.info.hp = 0
+    this.releaseHeliFrom(id)
+    if (by === this.match.you) setGameState({ message: `You eliminated ${remote.info.displayName}.` })
+    this.publishRoster()
+  }
+
+  playerRespawned(id: string) {
+    if (id === this.match.you) {
+      this.dead = false
+      this.player.spawn(this.spawnPoint())
+      setGameState({ dead: false, health: 100, message: 'Back in the fight!' })
+      this.publishRoster()
+      return
+    }
+    const remote = this.remotes.get(id)
+    if (!remote) return
+    remote.info.dead = false
+    remote.info.hp = 100
+    remote.snapped = false
+    this.publishRoster()
+  }
+
+  /** Just outside our gate (blue gate faces +X, red gate faces -X), teammates side by side. */
+  private spawnPoint() {
+    const base = this.ourBase.group.position
+    const mates = this.match.players.filter((p) => p.team === this.team)
+    const slot = Math.max(0, mates.findIndex((p) => p.id === this.match.you))
+    const gateDir = this.team === 'blue' ? 1 : -1
+    const spread = (slot - (mates.length - 1) / 2) * 4
+    return new THREE.Vector3(base.x + gateDir * 56, 0, base.z + gateDir * 8 + spread)
+  }
+
+  private applyOwnVitals(players: NetPlayer[]) {
+    const me = players.find((p) => p.id === this.match.you)
+    if (!me) return
+    setGameState({ health: me.hp ?? 100 })
+    if (me.dead && !this.dead) this.die(null)
+  }
+
+  private nameOf(id: string) {
+    return this.remotes.get(id)?.info.displayName ?? (id === this.match.you ? 'yourself' : 'an enemy')
+  }
+
+  private die(killer: string | null) {
+    this.dead = true
+    if (this.inHeli) {
+      this.inHeli = false
+      this.heli.setParked(true)
+      setGameState({ inHelicopter: false })
+    }
+    this.carryTarget = null
+    this.captureSent = false
+    this.mouse.shooting = false
+    for (const key of Object.keys(this.input) as Array<keyof typeof this.input>) this.input[key] = false
+    setGameState({
+      dead: true,
+      health: 0,
+      carryingFlag: false,
+      message: `${killer ? `You were eliminated by ${killer}` : 'You were eliminated'}. Respawning in 5 seconds…`,
+    })
+    this.publishRoster()
+  }
+
+  private releaseHeliFrom(pilotId: string) {
+    for (const team of ['blue', 'red'] as const) {
+      if (this.heliPilot[team] !== pilotId) continue
+      this.heliPilot[team] = null
+      const heli = this.helis[team]
+      const last = this.heliLastPose[team]
+      if (last) {
+        heli.object.position.set(...last.p)
+        heli.object.rotation.y = last.r[1]
+      }
+      heli.setParked(true)
+    }
+  }
+
+  /** Map a raycast hit back to an enemy player and report it; the server applies the damage. */
+  private reportHit(object: THREE.Object3D) {
+    for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+      const playerId = node.userData.playerId as string | undefined
+      if (playerId) {
+        const remote = this.remotes.get(playerId)
+        if (remote && remote.info.team !== this.team && !remote.info.dead) this.match.net.sendHit(playerId, this.weapon.weaponId)
+        return
+      }
+      const heliTeam = node.userData.heliTeam as Team | undefined
+      if (heliTeam) {
+        const pilot = this.heliPilot[heliTeam]
+        if (heliTeam !== this.team && pilot) this.match.net.sendHit(pilot, this.weapon.weaponId)
+        return
+      }
+    }
+  }
+
+  private shootTargets() {
+    const avatars: THREE.Object3D[] = []
+    for (const remote of this.remotes.values()) if (remote.avatar?.group.visible) avatars.push(remote.avatar.group)
+    return [...this.targetList, ...avatars]
   }
 
   endMatch(winner: Team) {
@@ -265,37 +399,41 @@ export class BattlefieldGame {
         avatar.position.lerp(feet, k)
         avatar.rotation.y = lerpAngle(avatar.rotation.y, s.yaw, k)
       }
-      avatar.visible = !s.heli
-      remote.avatar.carriedFlag.visible = s.flag
+      const flying = !!s.heli && !remote.info.dead
+      avatar.visible = !flying && !remote.info.dead
+      remote.avatar.carriedFlag.visible = s.flag && !remote.info.dead
 
-      if (s.heli) {
-        if (!remote.heli) {
-          remote.heli = createHelicopter(new THREE.Vector3(...s.heli.p))
-          remote.heli.setParked(false)
-          remote.heli.object.rotation.set(...s.heli.r)
-          this.scene.add(remote.heli.object)
+      // A remote pilot drives their team's shared helicopter; we never override our own while flying it
+      const team = remote.info.team
+      if (!team || (team === this.team && this.inHeli)) continue
+      if (flying && s.heli) {
+        const heli = this.helis[team]
+        if (this.heliPilot[team] !== remote.info.id) {
+          this.heliPilot[team] = remote.info.id
+          heli.setParked(false)
         }
-        const obj = remote.heli.object
-        obj.visible = true
+        const obj = heli.object
         obj.position.lerp(new THREE.Vector3(...s.heli.p), k)
         obj.rotation.set(
           THREE.MathUtils.lerp(obj.rotation.x, s.heli.r[0], k),
           lerpAngle(obj.rotation.y, s.heli.r[1], k),
           THREE.MathUtils.lerp(obj.rotation.z, s.heli.r[2], k),
         )
-        remote.heli.setRotorTarget(s.heli.rpm)
-        remote.heli.update(dt, time)
-      } else if (remote.heli) {
-        remote.heli.object.visible = false
+        heli.setRotorTarget(s.heli.rpm)
+        this.heliLastPose[team] = s.heli
+      } else if (this.heliPilot[team] === remote.info.id) {
+        this.releaseHeliFrom(remote.info.id)
       }
     }
+    // Our own helicopter is updated by the flight code; the enemy's is updated here
+    this.helis[other(this.team)].update(dt, time)
   }
 
   /** A flag is "taken" while anyone — us or a remote player — carries it. */
   private flagCarried(flagTeam: Team) {
     if (this.carryTarget === flagTeam) return true
     for (const remote of this.remotes.values()) {
-      if (remote.info.online && remote.target?.flag && remote.info.team === other(flagTeam)) return true
+      if (remote.info.online && !remote.info.dead && remote.target?.flag && remote.info.team === other(flagTeam)) return true
     }
     return false
   }
@@ -316,7 +454,8 @@ export class BattlefieldGame {
       id: this.match.you,
       name: me?.displayName ?? 'You',
       team: this.team,
-      status: this.carryTarget ? 'carrying flag' : this.inHeli ? 'flying' : 'on foot',
+      status: this.dead ? 'dead' : this.carryTarget ? 'carrying flag' : this.inHeli ? 'flying' : 'on foot',
+      hp: gameState.health,
       you: true,
     }]
     for (const remote of this.remotes.values()) {
@@ -325,7 +464,8 @@ export class BattlefieldGame {
         id: remote.info.id,
         name: remote.info.displayName,
         team: remote.info.team,
-        status: !remote.info.online ? 'offline' : s?.flag ? 'carrying flag' : s?.heli ? 'flying' : 'on foot',
+        status: !remote.info.online ? 'offline' : remote.info.dead ? 'dead' : s?.flag ? 'carrying flag' : s?.heli ? 'flying' : 'on foot',
+        hp: remote.info.hp ?? 100,
         you: false,
       })
     }
@@ -431,7 +571,7 @@ export class BattlefieldGame {
   }
 
   private toggleHelicopter() {
-    if (this.boarding) return
+    if (this.boarding || this.dead) return
     if (this.inHeli) {
       // Dismount: place player beside heli on the ground
       this.inHeli = false
@@ -448,7 +588,13 @@ export class BattlefieldGame {
     const eye = this.player.position
     const heliPos = this.heli.object.position
     const dist = eye.distanceTo(heliPos)
-    if (dist < 8) void this.boardHelicopter()
+    if (dist >= 8) return
+    const pilot = this.heliPilot[this.team]
+    if (pilot) {
+      setGameState({ message: `The helicopter is being flown by ${this.nameOf(pilot)}.` })
+      return
+    }
+    void this.boardHelicopter()
   }
 
   private async boardHelicopter() {
@@ -598,7 +744,7 @@ export class BattlefieldGame {
     const flagLocal = new THREE.Vector3(-12, 0, 0)
     const enemyFlagWorld = this.enemyBase.group.localToWorld(flagLocal.clone())
     const d = this.player.position.distanceTo(enemyFlagWorld)
-    if (d < 7 && !this.flagCarried(enemyTeam)) {
+    if (d < 7 && !this.dead && !this.flagCarried(enemyTeam)) {
       this.carryTarget = enemyTeam
       setGameState({
         carryingFlag: true,
@@ -638,7 +784,7 @@ export class BattlefieldGame {
       this.heli.object.position.z,
       this.inHeli ? 0 : 3.8,
     )
-    if (this.inHeli) {
+    if (this.inHeli || this.dead) {
       setGameState({ nearHelicopter: false })
       return
     }
@@ -665,9 +811,10 @@ export class BattlefieldGame {
 
       this.updateRemotes(dt, time)
       this.updateFlagVisibility()
-      this.rosterTimer += dt
-      if (this.rosterTimer >= ROSTER_INTERVAL) {
-        this.rosterTimer = 0
+      // Real time, not the capped frame dt, so slow machines don't fall behind
+      const now = performance.now()
+      if (now - this.lastRosterAt >= ROSTER_INTERVAL * 1000) {
+        this.lastRosterAt = now
         this.publishRoster()
       }
 
@@ -681,22 +828,22 @@ export class BattlefieldGame {
       this.updateHelicopter(dt, time)
       this.updateFlagsAndCapture()
 
-      this.netTimer += dt
-      if (this.netTimer >= NET_SEND_INTERVAL) {
-        this.netTimer = 0
+      if (now - this.lastNetSend >= NET_SEND_INTERVAL * 1000) {
+        this.lastNetSend = now
         this.sendNetState()
       }
 
       this.weapon.tick(dt)
       const cockpitCombat = this.inHeli && this.heliCameraMode === 'cockpit'
-      if (!this.inHeli || cockpitCombat) {
-        this.weapon.tryFire(this.mouse, dt, this.targetList)
+      if (!this.dead && (!this.inHeli || cockpitCombat)) {
+        const hit = this.weapon.tryFire(this.mouse, dt, this.shootTargets())
+        if (hit) this.reportHit(hit)
       }
       this.viewmodel.show(this.weapon.weaponId)
       this.viewmodel.update(dt, {
         recoilKick: this.weapon.shotCount !== this.lastShotCount,
         reloading: this.weapon.reloading,
-        hidden: (this.inHeli && !cockpitCombat) || gameState.finished,
+        hidden: (this.inHeli && !cockpitCombat) || gameState.finished || this.dead,
         moving: this.input.forward || this.input.back || this.input.left || this.input.right,
         time,
       })

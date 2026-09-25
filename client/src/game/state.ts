@@ -1,12 +1,13 @@
 import type { Team } from './world/bases'
 
-export type PlayerStatus = 'on foot' | 'flying' | 'carrying flag' | 'offline'
+export type PlayerStatus = 'on foot' | 'flying' | 'carrying flag' | 'dead' | 'offline'
 
 export interface RosterEntry {
   id: string
   name: string
   team: Team | null
   status: PlayerStatus
+  hp: number
   you: boolean
 }
 
@@ -32,6 +33,10 @@ export interface GameState {
   players: RosterEntry[]
   winner: Team | null
   connected: boolean
+  dead: boolean
+  /** Increments on every confirmed hit we land / damage we take, to flash the HUD. */
+  hitsLanded: number
+  damageTaken: number
 }
 
 type Listener = (s: GameState) => void
@@ -55,6 +60,9 @@ const INITIAL_STATE: GameState = {
   players: [],
   winner: null,
   connected: false,
+  dead: false,
+  hitsLanded: 0,
+  damageTaken: 0,
 }
 
 export const gameState: GameState = { ...INITIAL_STATE }
