@@ -474,14 +474,15 @@ export class BattlefieldGame {
       this.updateFlagsAndCapture()
 
       this.weapon.tick(dt)
-      if (!this.inHeli) {
+      const cockpitCombat = this.inHeli && this.heliCameraMode === 'cockpit'
+      if (!this.inHeli || cockpitCombat) {
         this.weapon.tryFire(this.mouse, dt, this.targetList)
       }
       this.viewmodel.show(this.weapon.weaponId)
       this.viewmodel.update(dt, {
         recoilKick: this.weapon.shotCount !== this.lastShotCount,
         reloading: this.weapon.reloading,
-        hidden: this.inHeli || gameState.finished,
+        hidden: (this.inHeli && !cockpitCombat) || gameState.finished,
         moving: this.input.forward || this.input.back || this.input.left || this.input.right,
         time,
       })
