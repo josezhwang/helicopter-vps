@@ -71,7 +71,10 @@ export function App() {
         room={activeRoom}
         onBack={() => navigate('dashboard')}
         onJoin={() => setRooms((current) => current.map((room) => room.id === activeRoom.id && !room.players.includes(currentUser) ? { ...room, players: [...room.players, currentUser], status: room.players.length + 1 >= room.maxPlayers ? 'full' : 'open' } : room))}
-        onStart={() => setRooms((current) => current.map((room) => room.id === activeRoom.id ? { ...room, status: 'live' } : room))}
+            onStart={() => {
+              setRooms((current) => current.map((room) => room.id === activeRoom.id ? { ...room, status: 'live' } : room))
+              window.location.hash = 'play'
+            }}
       />
     )
   }
@@ -150,7 +153,7 @@ function Dashboard({ rooms, onOpenRoom, onCreateRoom, onPlay }: { rooms: Room[];
   const createRoom = (event: FormEvent) => {
     event.preventDefault()
     const limit = Number(maxPlayers)
-    onCreateRoom({ id: `${Date.now()}`, name: roomName || 'Untitled operation', map, mode, maxPlayers: limit, players: [currentUser], ping: 24, status: limit === 1 ? 'full' : 'open', creator: currentUser })
+      onCreateRoom({ id: `${Date.now()}`, name: roomName || 'Untitled operation', map, mode, maxPlayers: limit, players: [currentUser], ping: 24, status: limit === 1 ? 'full' : 'open', creator: currentUser })
     setShowCreate(false)
   }
 
@@ -161,7 +164,7 @@ function Dashboard({ rooms, onOpenRoom, onCreateRoom, onPlay }: { rooms: Room[];
         <aside className="side-rail"><div className="rail-label">COMMAND / 01</div><div className="pilot-card"><div className="pilot-avatar">NP</div><strong>{currentUser}</strong><span>RANK 04 / PATHFINDER</span><div className="rank-line"><i /></div></div><button className="rail-link active"><span>◈</span> Operations</button><button className="rail-link"><span>◇</span> Squad finder</button><button className="rail-link"><span>◌</span> Records</button><div className="rail-bottom"><span className="online-dot" /> Server cluster: EU-2<br /><small>48 ms average latency</small></div></aside>
         <section className="dashboard-main"><header className="page-heading"><div><p className="kicker">THURSDAY / 25 SEPTEMBER 2026</p><h1>Operations room</h1><p className="muted">Assemble your squad. Cross the line.</p></div><button className="button primary" onClick={() => setShowCreate(true)}><span className="button-plus">+</span> Create room</button></header><div className="status-strip"><div><span className="status-number">{openRooms.length}</span><span>rooms open</span></div><div><span className="status-number">24</span><span>pilots online</span></div><div><span className="status-number">03</span><span>regions live</span></div><button className="play-link" onClick={onPlay}>Preview battlefield <span>→</span></button></div><div className="room-heading"><h2>Open operations</h2><button className="text-button">Filter: all regions⌄</button></div><div className="room-list">{openRooms.map((room) => <RoomCard key={room.id} room={room} onOpen={() => onOpenRoom(room.id)} />)}</div></section>
       </div>
-      {showCreate && <div className="modal-backdrop"><form className="create-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setShowCreate(false)}>×</button><p className="kicker">NEW OPERATION</p><h2>Set the parameters.</h2><label>Room name<input autoFocus value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="e.g. Dawn Patrol" /></label><div className="form-two"><label>Game mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option>Flag Assault</option><option>Team Skirmish</option></select></label><label>Map<select value={map} onChange={(event) => setMap(event.target.value)}><option>Sierra Basin</option><option>Copper Valley</option><option>Northwatch</option></select></label></div><label>Attendance limit<select value={maxPlayers} onChange={(event) => setMaxPlayers(event.target.value)}>{[2, 4, 6, 8, 12, 16].map((number) => <option key={number} value={number}>{number} pilots</option>)}</select></label><p className="form-hint">The operation starts when the room reaches this limit. You can launch it from the lobby.</p><button className="button primary" type="submit">Create operation</button></form></div>}
+        {showCreate && <div className="modal-backdrop"><form className="create-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setShowCreate(false)}>×</button><p className="kicker">NEW OPERATION</p><h2>Set the parameters.</h2><label>Room name<input autoFocus value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="e.g. Dawn Patrol" /></label><div className="form-two"><label>Game mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option>Flag Assault</option><option>Team Skirmish</option></select></label><label>Map<select value={map} onChange={(event) => setMap(event.target.value)}><option>Sierra Basin</option><option>Copper Valley</option><option>Northwatch</option></select></label></div><label>Attendance limit<select value={maxPlayers} onChange={(event) => setMaxPlayers(event.target.value)}>{[1, 2, 4, 6, 8, 12, 16].map((number) => <option key={number} value={number}>{number} pilots</option>)}</select></label><p className="form-hint">The operation starts when the room reaches this limit. You can launch it from the lobby.</p><button className="button primary" type="submit">Create operation</button></form></div>}
     </main>
   )
 }
