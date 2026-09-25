@@ -12,7 +12,7 @@ export class Viewmodel {
   private currentId: WeaponId | null = null
   private recoil = 0
   private models = new Map<WeaponId, THREE.Object3D>()
-  private basePos = new THREE.Vector3(0.62, -0.42, -0.8)
+  private basePos = new THREE.Vector3(0.72, -0.42, -0.8)
 
   constructor(private camera: THREE.PerspectiveCamera) {
     this.camera.add(this.group)
@@ -38,11 +38,11 @@ export class Viewmodel {
             if (mat) mat.envMapIntensity = 0.4
           }
         })
-        // Normalize to ~0.5 units long, orient along -Z, grip in hand
+        // Normalize to ~0.42 units long, orient along -Z, grip in hand
         const box = new THREE.Box3().setFromObject(model)
         const size = box.getSize(new THREE.Vector3())
         const maxDim = Math.max(size.x, size.y, size.z) || 1
-        model.scale.setScalar(0.5 / maxDim)
+        model.scale.setScalar(0.42 / maxDim)
         model.position.set(0, 0, 0)
         model.rotation.y = -Math.PI / 2
         const gun = new THREE.Group()
