@@ -152,7 +152,7 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       if (fallbackMainRotor) fallbackMainRotor.rotation.y += (spin / 100) * 40 * dt
       if (fallbackTailRotor) fallbackTailRotor.rotation.x += (spin / 100) * 56 * dt
 
-      doorProgress = THREE.MathUtils.lerp(doorProgress, doorTarget, Math.min(1, dt * 8))
+      doorProgress = THREE.MathUtils.lerp(doorProgress, doorTarget, Math.min(1, dt * 2.5))
       for (const door of doorNodes) {
         const baseY = doorBaseRotations.get(door) ?? door.rotation.y
         door.rotation.y = baseY - doorProgress * 1.1
@@ -194,7 +194,8 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
           if (name.includes('main')) mainRotor = node
           else if (name.includes('rear') || name.includes('tail')) tailRotor = node
         }
-        if (name.includes('doors')) {
+        // Animate only the side entry door; the other GLB door panels stay closed.
+        if (name.startsWith('doors.003')) {
           doorNodes.push(node)
           doorBaseRotations.set(node, node.rotation.y)
         }

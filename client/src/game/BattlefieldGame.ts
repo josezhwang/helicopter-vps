@@ -41,6 +41,7 @@ export class BattlefieldGame {
   private boundHandlers: Array<[EventTarget, string, EventListener]> = []
   private lastShotCount = 0
   private boarding = false
+  private lastHeliYaw = 0
 
   constructor(private container: HTMLElement) {
     // Renderer
@@ -236,17 +237,20 @@ export class BattlefieldGame {
     this.boarding = true
     this.heli.setDoorOpen(true)
     setGameState({ message: 'Opening helicopter door...' })
-    await new Promise((resolve) => window.setTimeout(resolve, 450))
+    await new Promise((resolve) => window.setTimeout(resolve, 900))
 
     const seat = this.heli.object.localToWorld(HELI_SEAT_OFFSET.clone())
     this.player.position.copy(seat)
     this.player.velocity.set(0, 0, 0)
+    this.player.yaw = this.heliYaw
+    this.player.pitch = 0
+    this.lastHeliYaw = this.heliYaw
     this.inHeli = true
     this.heli.setParked(false)
     this.heliFlightAltitude = this.heli.object.position.y
     setGameState({ inHelicopter: true, message: 'Press SPACE to spin up the rotor. W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, E to exit.' })
 
-    await new Promise((resolve) => window.setTimeout(resolve, 300))
+    await new Promise((resolve) => window.setTimeout(resolve, 550))
     this.heli.setDoorOpen(false)
     this.boarding = false
   }
@@ -280,6 +284,10 @@ export class BattlefieldGame {
 
     this.heliYaw += turnInput * dt * 1.1 * liftReady
     const yaw = this.heliYaw
+    if (this.inHeli) {
+      this.player.yaw += yaw - this.lastHeliYaw
+      this.lastHeliYaw = yaw
+    }
 
     // Nose direction = local +Z rotated by yaw: (sin yaw, cos yaw)
     const dirX = Math.sin(yaw)
@@ -323,15 +331,10 @@ export class BattlefieldGame {
       heliObj.rotation.set(this.heliPitch, yaw, this.heliRoll)
     }
 
-    // Camera chase: behind and above the heli (behind = tail side, -nose)
-    const back = new THREE.Vector3(-dirX, 0, -dirZ).multiplyScalar(18)
-    const camTarget = new THREE.Vector3(
-      heliObj.position.x + back.x,
-      heliObj.position.y + 7,
-      heliObj.position.z + back.z,
-    )
-    this.camera.position.lerp(camTarget, Math.min(1, dt * 4))
-    this.camera.lookAt(heliObj.position.x, heliObj.position.y + 2, heliObj.position.z)
+    const cockpitPosition = heliObj.localToWorld(HELI_SEAT_OFFSET.clone())
+    this.camera.position.lerp(cockpitPosition, Math.min(1, dt * 12))
+    this.camera.rotation.order = 'YXZ'
+    this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
   }
 
   private heliYaw = Math.PI * 0.25
