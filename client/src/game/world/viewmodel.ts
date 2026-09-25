@@ -42,7 +42,7 @@ export class Viewmodel {
         const box = new THREE.Box3().setFromObject(model)
         const size = box.getSize(new THREE.Vector3())
         const maxDim = Math.max(size.x, size.y, size.z) || 1
-        model.scale.setScalar(0.42 / maxDim)
+        model.scale.setScalar(0.8 / maxDim)
         model.position.set(0, 0, 0)
         model.rotation.y = -Math.PI / 2
         const gun = new THREE.Group()
