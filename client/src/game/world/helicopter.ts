@@ -32,6 +32,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
   const object = new THREE.Group()
   object.position.copy(padWorldPos)
 
+  const bodyLight = new THREE.PointLight(0xffd7a0, 9, 30)
+  bodyLight.position.set(2.5, 4.5, 1.5)
+  object.add(bodyLight)
+
   // --- Viewer-style rotor state ---
   const state = {
     rotorSpeed: 0,

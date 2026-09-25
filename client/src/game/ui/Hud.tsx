@@ -47,6 +47,22 @@ export function Hud() {
           lineHeight: 1.5,
         }}
       >
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#ffb0a8' }}>
+            <span>HEALTH</span>
+            <span>{Math.round(state.health)}%</span>
+          </div>
+          <div style={{ width: 190, height: 8, marginTop: 3, background: 'rgba(255, 255, 255, 0.16)', borderRadius: 3, overflow: 'hidden' }}>
+            <div
+              style={{
+                width: `${Math.max(0, Math.min(100, state.health))}%`,
+                height: '100%',
+                background: state.health > 50 ? '#57d68d' : state.health > 25 ? '#f4c95d' : '#ef6b66',
+                transition: 'width 160ms ease, background 160ms ease',
+              }}
+            />
+          </div>
+        </div>
         <div style={{ fontSize: 18, color: '#8fd0ff' }}>
           {state.reloading ? 'RELOADING…' : `AMMO ${state.ammo} / ${state.maxAmmo}`}
         </div>
