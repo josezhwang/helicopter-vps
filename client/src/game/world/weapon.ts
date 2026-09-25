@@ -51,8 +51,8 @@ export class Weapon {
     return this.shotsFired
   }
 
-  /** Returns the object the shot hit, or null when nothing fired or nothing was hit. */
-  tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]): THREE.Object3D | null {
+  /** Returns where a fired shot ended and what it hit first (null object = open air); null when nothing fired. */
+  tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]): { end: THREE.Vector3; object: THREE.Object3D | null } | null {
     this.flashTimer -= dt
     if (this.flashTimer <= 0) this.flashLight.intensity = 0
 
@@ -77,26 +77,29 @@ export class Weapon {
     const raycaster = new THREE.Raycaster(origin, dir, 0.5, this.def.range)
     const hits = raycaster.intersectObjects(targets, true)
 
+    // Only the nearest hit counts: a rock or tree in front of an enemy stops the bullet
+    const end = hits.length > 0 ? hits[0].point.clone() : origin.clone().addScaledVector(dir, this.def.range)
+    this.spawnTracer(origin.clone().addScaledVector(dir, 1.4), end, this.def.color)
+    return { end, object: hits[0]?.object ?? null }
+  }
+
+  /** Brief fading tracer line; also used to draw other players' shots. */
+  spawnTracer(start: THREE.Vector3, end: THREE.Vector3, color = this.def.color) {
     const tracer = this.tracerPool.find((t) => !t.visible)
-    if (tracer) {
-      const end = hits.length > 0 ? hits[0].point : origin.clone().addScaledVector(dir, this.def.range)
-      const start = origin.clone().addScaledVector(dir, 1.4)
-      const len = start.distanceTo(end)
-      tracer.position.copy(start).lerp(end, 0.5)
-      tracer.lookAt(end)
-      tracer.scale.set(1, 1, len)
-      tracer.visible = true
-      const mat = tracer.material as THREE.MeshBasicMaterial
-      mat.color.setHex(this.def.color)
-      mat.opacity = 0.9
-      const fade = () => {
-        mat.opacity -= 0.12
-        if (mat.opacity > 0) requestAnimationFrame(fade)
-        else tracer.visible = false
-      }
-      requestAnimationFrame(fade)
+    if (!tracer) return
+    tracer.position.copy(start).lerp(end, 0.5)
+    tracer.lookAt(end)
+    tracer.scale.set(1, 1, start.distanceTo(end))
+    tracer.visible = true
+    const mat = tracer.material as THREE.MeshBasicMaterial
+    mat.color.setHex(color)
+    mat.opacity = 0.9
+    const fade = () => {
+      mat.opacity -= 0.12
+      if (mat.opacity > 0) requestAnimationFrame(fade)
+      else tracer.visible = false
     }
-    return hits[0]?.object ?? null
+    requestAnimationFrame(fade)
   }
 
   reload() {

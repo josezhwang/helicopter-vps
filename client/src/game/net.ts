@@ -32,6 +32,7 @@ export interface NetHandlers {
   onHp: (id: string, hp: number, by: string) => void
   onKilled: (id: string, by: string) => void
   onRespawn: (id: string) => void
+  onShot: (id: string, to: Vec3) => void
   onError: (message: string) => void
   onConnection: (connected: boolean) => void
 }
@@ -68,6 +69,7 @@ export class Multiplayer {
         case 'hp': this.handlers.onHp(String(message.id), Number(message.hp), String(message.by)); break
         case 'killed': this.handlers.onKilled(String(message.id), String(message.by)); break
         case 'respawn': this.handlers.onRespawn(String(message.id)); break
+        case 'shot': this.handlers.onShot(String(message.id), message.to as Vec3); break
         case 'error':
           this.fatal = true
           this.handlers.onError(String(message.message))
@@ -88,6 +90,10 @@ export class Multiplayer {
 
   sendState(state: NetState) {
     this.send({ type: 'state', s: state })
+  }
+
+  sendShot(to: Vec3) {
+    this.send({ type: 'shot', to })
   }
 
   sendHit(target: string, weapon: string) {

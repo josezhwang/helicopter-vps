@@ -31,6 +31,7 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
       onHp: (id, hp, by) => game?.applyHp(id, hp, by),
       onKilled: (id, by) => game?.playerKilled(id, by),
       onRespawn: (id) => game?.playerRespawned(id),
+      onShot: (id, to) => game?.remoteShot(id, to),
       onError: (message) => setError(message),
       onConnection: (connected) => setGameState({ connected }),
     })

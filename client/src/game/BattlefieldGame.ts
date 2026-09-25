@@ -21,6 +21,8 @@ interface RemotePlayer {
   avatar: Avatar | null
   target: NetState | null
   snapped: boolean
+  /** Smoothed ground speed of the rendered avatar, drives idle/run blending. */
+  speed: number
 }
 
 const NET_SEND_INTERVAL = 1 / 15
@@ -40,6 +42,7 @@ export class BattlefieldGame {
   private remotes = new Map<string, RemotePlayer>()
   private lastNetSend = 0
   private lastRosterAt = 0
+  private lastFrameAt = 0
   private lastRosterJson = ''
   private captureSent = false
   /** One helicopter per team, visible to everyone; ours is `this.heli`. */
@@ -112,8 +115,10 @@ export class BattlefieldGame {
     const worldCircles: Array<{ x: number; z: number; r: number }> = []
     this.scene.add(terrain)
     this.scene.add(createWater())
-    this.scene.add(createForest(worldCircles))
-    this.scene.add(createRocks(worldCircles))
+    const forest = createForest(worldCircles)
+    const rocks = createRocks(worldCircles)
+    this.scene.add(forest)
+    this.scene.add(rocks)
     this.scene.add(createBushes(worldCircles))
     this.scene.add(createClouds())
 
@@ -161,8 +166,9 @@ export class BattlefieldGame {
     this.viewmodel.loadHandgun()
     this.viewmodel.show('primary-handgun')
 
-    // Raycast targets for shooting: terrain + bases + both helicopters (player avatars are added per shot)
-    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, this.helis.blue.object, this.helis.red.object]
+    // Everything that stops a bullet: terrain, bases, trees, rocks, helicopters (player avatars are added per shot).
+    // Bushes are left out on purpose: they hide you but don't stop bullets.
+    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, forest, rocks, this.helis.blue.object, this.helis.red.object]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
@@ -183,7 +189,7 @@ export class BattlefieldGame {
     if (player.id === this.match.you) return
     let remote = this.remotes.get(player.id)
     if (!remote) {
-      remote = { info: player, avatar: null, target: null, snapped: false }
+      remote = { info: player, avatar: null, target: null, snapped: false, speed: 0 }
       this.remotes.set(player.id, remote)
     }
     if (remote.avatar && remote.info.team !== player.team) {
@@ -272,6 +278,22 @@ export class BattlefieldGame {
     this.publishRoster()
   }
 
+  /** Another player fired: muzzle flash on their gun (or their helicopter) and a tracer to where it landed. */
+  remoteShot(id: string, to: [number, number, number]) {
+    const remote = this.remotes.get(id)
+    if (!remote?.avatar || !remote.info.online || remote.info.dead || !remote.target) return
+    const end = new THREE.Vector3(...to)
+    let start: THREE.Vector3
+    if (remote.avatar.group.visible) {
+      start = remote.avatar.fire()
+    } else if (remote.target.heli && remote.info.team) {
+      start = this.helis[remote.info.team].object.localToWorld(new THREE.Vector3(0, 1.4, 4))
+    } else {
+      return
+    }
+    this.weapon.spawnTracer(start, end, 0xffd27a)
+  }
+
   /** Just outside our gate (blue gate faces +X, red gate faces -X), teammates side by side. */
   private spawnPoint() {
     const base = this.ourBase.group.position
@@ -348,7 +370,9 @@ export class BattlefieldGame {
   private shootTargets() {
     const avatars: THREE.Object3D[] = []
     for (const remote of this.remotes.values()) if (remote.avatar?.group.visible) avatars.push(remote.avatar.group)
-    return [...this.targetList, ...avatars]
+    // From the cockpit, don't let shots hit the helicopter we're sitting in
+    const targets = this.inHeli ? this.targetList.filter((t) => t !== this.heli.object) : this.targetList
+    return [...targets, ...avatars]
   }
 
   endMatch(winner: Team) {
@@ -391,17 +415,23 @@ export class BattlefieldGame {
       if (!remote.info.online || !s || !remote.avatar) continue
       const avatar = remote.avatar.group
       const feet = new THREE.Vector3(s.p[0], s.p[1] - EYE_HEIGHT, s.p[2])
+      let groundSpeed = 0
       if (!remote.snapped || avatar.position.distanceToSquared(feet) > SNAP_DISTANCE ** 2) {
         avatar.position.copy(feet)
         avatar.rotation.y = s.yaw
         remote.snapped = true
       } else {
+        const beforeX = avatar.position.x
+        const beforeZ = avatar.position.z
         avatar.position.lerp(feet, k)
         avatar.rotation.y = lerpAngle(avatar.rotation.y, s.yaw, k)
+        groundSpeed = Math.hypot(avatar.position.x - beforeX, avatar.position.z - beforeZ) / Math.max(dt, 1e-3)
       }
+      remote.speed = THREE.MathUtils.lerp(remote.speed, groundSpeed, 1 - Math.exp(-dt * 6))
       const flying = !!s.heli && !remote.info.dead
       avatar.visible = !flying && !remote.info.dead
       remote.avatar.carriedFlag.visible = s.flag && !remote.info.dead
+      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch)
 
       // A remote pilot drives their team's shared helicopter; we never override our own while flying it
       const team = remote.info.team
@@ -807,9 +837,13 @@ export class BattlefieldGame {
       if (this.disposed) return
       requestAnimationFrame(loop)
       const dt = Math.min(this.clock.getDelta(), 0.05)
+      // Remote players follow real elapsed time so they stay in sync on slow machines
+      const frameAt = performance.now()
+      const realDt = this.lastFrameAt ? Math.min((frameAt - this.lastFrameAt) / 1000, 0.5) : dt
+      this.lastFrameAt = frameAt
       const time = this.clock.elapsedTime
 
-      this.updateRemotes(dt, time)
+      this.updateRemotes(realDt, time)
       this.updateFlagVisibility()
       // Real time, not the capped frame dt, so slow machines don't fall behind
       const now = performance.now()
@@ -836,8 +870,11 @@ export class BattlefieldGame {
       this.weapon.tick(dt)
       const cockpitCombat = this.inHeli && this.heliCameraMode === 'cockpit'
       if (!this.dead && (!this.inHeli || cockpitCombat)) {
-        const hit = this.weapon.tryFire(this.mouse, dt, this.shootTargets())
-        if (hit) this.reportHit(hit)
+        const shot = this.weapon.tryFire(this.mouse, dt, this.shootTargets())
+        if (shot) {
+          this.match.net.sendShot([shot.end.x, shot.end.y, shot.end.z])
+          if (shot.object) this.reportHit(shot.object)
+        }
       }
       this.viewmodel.show(this.weapon.weaponId)
       this.viewmodel.update(dt, {

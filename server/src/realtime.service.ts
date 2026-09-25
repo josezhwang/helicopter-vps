@@ -30,6 +30,7 @@ interface Vitals {
   hp: number
   dead: boolean
   lastShotAt: number
+  lastShotFxAt: number
   respawnTimer?: NodeJS.Timeout
 }
 
@@ -147,6 +148,8 @@ export class RealtimeService implements OnModuleDestroy {
         state.hp = this.vitalsOf(roomId, conn.userId).hp
         conn.state = state
         this.broadcast(roomId, { type: 'state', id: conn.userId, s: state }, conn.userId)
+      } else if (message.type === 'shot') {
+        this.shot(roomId, conn, message)
       } else if (message.type === 'hit') {
         this.hit(roomId, conn, message)
       } else if (message.type === 'capture') {
@@ -205,13 +208,24 @@ export class RealtimeService implements OnModuleDestroy {
     let room = this.vitals.get(roomId)
     if (!room) this.vitals.set(roomId, (room = new Map()))
     let vitals = room.get(userId)
-    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0 }))
+    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0 }))
     return vitals
   }
 
   private clearVitals(roomId: string) {
     for (const vitals of this.vitals.get(roomId)?.values() ?? []) clearTimeout(vitals.respawnTimer)
     this.vitals.delete(roomId)
+  }
+
+  /** Relay a fired shot so everyone else sees the muzzle flash and tracer. */
+  private shot(roomId: string, shooter: Connection, message: Record<string, unknown>) {
+    const to = vec(message.to, 600, -100, 600)
+    const vitals = this.vitalsOf(roomId, shooter.userId)
+    if (!to || vitals.dead) return
+    const now = Date.now()
+    if (now - vitals.lastShotFxAt < WEAPONS['primary-handgun'].fireRate * 1000 * FIRE_RATE_SLACK) return
+    vitals.lastShotFxAt = now
+    this.broadcast(roomId, { type: 'shot', id: shooter.userId, to }, shooter.userId)
   }
 
   private hit(roomId: string, shooter: Connection, message: Record<string, unknown>) {
