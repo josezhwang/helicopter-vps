@@ -4,6 +4,8 @@ A 3D capture-the-flag battlefield with a PostgreSQL-backed account and battle-ro
 
 ## Run
 
+Requires Node.js 22.14.0 or newer (`.nvmrc` pins 22.14.0).
+
 ```bash
 npm install
 npm run dev:server   # Nest API on http://localhost:3002

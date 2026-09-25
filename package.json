@@ -10,5 +10,8 @@
     "dev:server": "npm run start:dev -w server",
     "build": "npm run build -w client",
     "typecheck": "tsc --noEmit -p client"
+  },
+  "engines": {
+    "node": ">=22.14.0"
   }
 }
