@@ -14,9 +14,6 @@
 /.vite
 *.tsbuildinfo
 
-# Large binary assets
-*.glb
-
 # Environment files
 .env
 .env.*
