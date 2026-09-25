@@ -47,7 +47,6 @@ export class Weapon {
   }
 
   tryFire(input: { shooting: boolean }, dt: number, targets: THREE.Object3D[]) {
-    this.cooldown -= dt
     this.flashTimer -= dt
     if (this.flashTimer <= 0) this.flashLight.intensity = 0
 
