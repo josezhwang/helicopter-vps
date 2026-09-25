@@ -20,7 +20,7 @@ export interface GameState {
 
 type Listener = (s: GameState) => void
 
-export const gameState: GameState = {
+const INITIAL_STATE: GameState = {
   ammo: 12,
   maxAmmo: 12,
   reloading: false,
@@ -37,7 +37,14 @@ export const gameState: GameState = {
   message: 'Steal the RED flag from the enemy base and bring it to your BLUE base to WIN. [E] to interact.',
 }
 
+export const gameState: GameState = { ...INITIAL_STATE }
+
 const listeners = new Set<Listener>()
+
+export function resetGameState() {
+  Object.assign(gameState, INITIAL_STATE)
+  listeners.forEach((fn) => fn(gameState))
+}
 
 export function subscribeGameState(fn: Listener): () => void {
   listeners.add(fn)

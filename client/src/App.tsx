@@ -3,53 +3,74 @@ import { Game } from './game/Game'
 import './styles.css'
 
 type AuthView = 'login' | 'signup' | 'forgot'
-type SiteView = AuthView | 'dashboard' | 'room'
-type Room = { id: string; name: string; map: string; mode: string; maxMembers: number; memberCount: number; status: 'waiting' | 'live' | 'finished'; creatorDisplayId: string; ping?: number }
+type SiteView = AuthView | 'dashboard' | 'room' | 'play'
+type Room = { id: string; name: string; map: string; mode: string; maxMembers: number; memberCount: number; memberIds: string[]; status: 'waiting' | 'live' | 'finished'; creatorDisplayId: string; ping?: number }
 type User = { id: string; email: string; displayId: string; displayName: string }
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
+const ROOMS_POLL_MS = 3000
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
 
+let onUnauthorized: () => void = () => undefined
+
 async function api<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
   const data = await response.json().catch(() => ({})) as { message?: string }
-  if (!response.ok) throw new ApiError(Array.isArray(data.message) ? data.message.join(', ') : data.message ?? 'Request failed', response.status)
+  if (!response.ok) {
+    if (response.status === 401) onUnauthorized()
+    throw new ApiError(Array.isArray(data.message) ? data.message.join(', ') : data.message ?? 'Request failed', response.status)
+  }
   return data as T
 }
 
-function navigate(view: SiteView) { window.location.hash = view === 'dashboard' ? '' : view }
+function readHash() { return window.location.hash.replace(/^#\/?/, '') }
+function navigate(view: SiteView, roomId?: string) { window.location.hash = view === 'dashboard' ? '' : view === 'room' && roomId ? `/room/${roomId}` : `/${view}` }
+
+function toRoom(room: Record<string, unknown>): Room {
+  return { id: String(room.id), name: String(room.name), map: 'Sierra Basin', mode: String(room.battle_type), maxMembers: Number(room.max_members), memberCount: Number(room.member_count), memberIds: Array.isArray(room.member_ids) ? room.member_ids.map(String) : [], status: room.status as Room['status'], creatorDisplayId: String(room.creator_display_id ?? ''), ping: 24 }
+}
 
 export function App() {
-  const [view, setView] = useState<SiteView>(() => window.localStorage.getItem('aerium_token') ? 'dashboard' : 'login')
+  const [hash, setHash] = useState(readHash)
   const [token, setToken] = useState(() => window.localStorage.getItem('aerium_token') ?? '')
   const [user, setUser] = useState<User | null>(() => { try { return JSON.parse(window.localStorage.getItem('aerium_user') ?? 'null') as User | null } catch { return null } })
   const [rooms, setRooms] = useState<Room[]>([])
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null)
-  const activeRoom = rooms.find((room) => room.id === activeRoomId) ?? null
 
-  const loadRooms = async () => {
-    const data = await api<Array<Record<string, unknown>>>('/rooms', {}, token)
-    setRooms(data.map((room) => ({ id: String(room.id), name: String(room.name), map: 'Sierra Basin', mode: String(room.battle_type), maxMembers: Number(room.max_members), memberCount: Number(room.member_count), status: room.status as Room['status'], creatorDisplayId: String(room.creator_display_id ?? ''), ping: 24 })))
-  }
-
-  useEffect(() => {
-    const handleHash = () => { const hash = window.location.hash.replace('#/', ''); if (hash !== 'play') setView(hash === 'room' ? 'room' : token ? 'dashboard' : hash === 'signup' || hash === 'forgot' ? hash : 'login') }
-    handleHash()
-    window.addEventListener('hashchange', handleHash)
-    return () => window.removeEventListener('hashchange', handleHash)
-  }, [token])
+  const roomId = hash.startsWith('room/') ? hash.slice('room/'.length) : null
+  const view: SiteView = hash === 'play' ? 'play' : roomId ? 'room' : token ? 'dashboard' : hash === 'signup' || hash === 'forgot' ? hash : 'login'
+  const activeRoom = rooms.find((room) => room.id === roomId) ?? null
+  const playing = view === 'play'
 
   const logout = () => { window.localStorage.clear(); setToken(''); setUser(null); navigate('login') }
+  const loadRooms = async () => { setRooms((await api<Record<string, unknown>[]>('/rooms')).map(toRoom)) }
 
-  useEffect(() => { if (token) void loadRooms().catch((error) => { if (error instanceof ApiError && error.status === 401) logout() }) }, [token])
-  if (window.location.hash === '#/play') return <Game />
-  const authRoute = view === 'login' || view === 'signup' || view === 'forgot'
-  if (!user || !token || authRoute && window.location.hash !== '') return <AuthScreen mode={view === 'signup' || view === 'forgot' ? view : 'login'} onNavigate={navigate} onAuthenticated={(session) => { setToken(session.token); setUser(session.user); window.localStorage.setItem('aerium_token', session.token); window.localStorage.setItem('aerium_user', JSON.stringify(session.user)); navigate('dashboard') }} />
+  useEffect(() => {
+    const onHashChange = () => setHash(readHash())
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  useEffect(() => { onUnauthorized = logout })
+
+  useEffect(() => {
+    if (!token || playing) return
+    void api<User>('/auth/me', {}, token).then((me) => { setUser(me); window.localStorage.setItem('aerium_user', JSON.stringify(me)) }).catch(() => undefined)
+    const refresh = () => void loadRooms().catch(() => undefined)
+    refresh()
+    const timer = window.setInterval(refresh, ROOMS_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [token, playing])
+
+  if (playing) return <Game />
+  if (!user || !token) {
+    const mode: AuthView = view === 'signup' || view === 'forgot' ? view : 'login'
+    return <AuthScreen key={mode} mode={mode} onNavigate={navigate} onAuthenticated={(session) => { setToken(session.token); setUser(session.user); window.localStorage.setItem('aerium_token', session.token); window.localStorage.setItem('aerium_user', JSON.stringify(session.user)); navigate('dashboard') }} />
+  }
   if (view === 'room' && activeRoom) return <RoomLobby room={activeRoom} user={user} token={token} onBack={() => navigate('dashboard')} onRefresh={loadRooms} />
-  return <Dashboard rooms={rooms} user={user} token={token} onOpenRoom={(id) => { setActiveRoomId(id); navigate('room') }} onCreated={async () => { await loadRooms() }} onLogout={logout} />
+  return <Dashboard rooms={rooms} user={user} token={token} onOpenRoom={(id) => navigate('room', id)} onCreated={loadRooms} onLogout={logout} />
 }
 
 function AuthScreen({ mode, onNavigate, onAuthenticated }: { mode: AuthView; onNavigate: (view: SiteView) => void; onAuthenticated: (session: { token: string; user: User }) => void }) {
@@ -63,9 +84,7 @@ function AuthScreen({ mode, onNavigate, onAuthenticated }: { mode: AuthView; onN
       const body = mode === 'signup' ? { email: form.get('email'), password: form.get('password'), checkPassword: form.get('checkPassword'), displayId: form.get('displayId'), displayName: form.get('displayName') } : { email: form.get('email'), password: form.get('password') }
       onAuthenticated(await api<{ token: string; user: User }>(`/auth/${mode}`, { method: 'POST', body: JSON.stringify(body) }))
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Request failed'
-      if (message.includes('account with this email already exists')) { onNavigate('login'); return }
-      setError(message)
+      setError(requestError instanceof Error ? requestError.message : 'Request failed')
     }
   }
   const signup = mode === 'signup'
@@ -81,8 +100,12 @@ function Dashboard({ rooms, user, token, onOpenRoom, onCreated, onLogout }: { ro
 function RoomCard({ room, onOpen }: { room: Room; onOpen: () => void }) { const full = room.memberCount >= room.maxMembers; return <article className="room-card"><div className="room-icon">◆</div><div className="room-info"><div className="room-title"><h3>{room.name}</h3><span className={`room-status ${full ? 'full' : room.status}`}>{full ? 'FULL' : room.status.toUpperCase()}</span></div><p>FLAG STEAL <span>/</span> {room.map}</p><div className="room-meta"><span>{room.memberCount} / {room.maxMembers} members</span><span>Created by @{room.creatorDisplayId}</span><span>{room.ping ?? 24} ms</span></div><div className="capacity"><i style={{ width: `${Math.min(100, (room.memberCount / room.maxMembers) * 100)}%` }} /></div></div><button className="button outline" onClick={onOpen}>{full ? 'Open room' : 'Join room'} <span>→</span></button></article> }
 
 function RoomLobby({ room, user, token, onBack, onRefresh }: { room: Room; user: User; token: string; onBack: () => void; onRefresh: () => Promise<void> }) {
-  const [error, setError] = useState(''); const isCreator = room.creatorDisplayId === user.displayId; const isFull = room.memberCount >= room.maxMembers
+  const [error, setError] = useState('')
+  const isCreator = room.creatorDisplayId === user.displayId
+  const isMember = room.memberIds.includes(user.id)
+  const isFull = room.memberCount >= room.maxMembers
+  useEffect(() => { if (room.status === 'live' && isMember) navigate('play') }, [room.status, isMember])
   const join = async () => { try { await api(`/rooms/${room.id}/join`, { method: 'POST' }, token); await onRefresh() } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not join room') } }
-  const start = async () => { try { await api(`/rooms/${room.id}/start`, { method: 'POST' }, token); window.location.hash = 'play' } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not start room') } }
-  return <main className="site-shell lobby-shell"><nav className="topbar"><button className="back-button" onClick={onBack}>← Operations</button><div className="brand-mark dark"><span className="brand-cross">+</span> AERIUM</div><div className="profile"><span className="online-dot" /> {user.displayName}</div></nav><section className="lobby-content"><div className="lobby-header"><div><p className="kicker">ROOM LOBBY / {room.id.slice(0, 8).toUpperCase()}</p><h1>{room.name}</h1><p className="muted">FLAG STEAL / {room.map}</p></div><span className={`room-status large ${room.status === 'waiting' ? 'open' : room.status}`}>{room.status === 'live' ? 'IN PROGRESS' : isFull ? 'ROOM FULL' : 'WAITING FOR PILOTS'}</span></div><div className="lobby-board"><div className="lobby-map"><div className="map-lines" /><span className="map-tag">FLAG STEAL</span><div className="map-coordinates">LIVE DATABASE<br />ROOM READY</div></div><div className="roster-panel"><div className="roster-title"><h2>Attendance</h2><span>{room.memberCount} / {room.maxMembers}</span></div><p className="form-hint">Members are synchronized through the room API. Socket synchronization can attach to this room ID next.</p><div className="lobby-actions">{!isCreator && room.status === 'waiting' && <button className="button outline" onClick={join}>Join room</button>}{isCreator && <button className="button primary" disabled={!isFull || room.status !== 'waiting'} onClick={start}>{isFull ? 'Start game' : `Waiting for ${room.maxMembers - room.memberCount} more`}</button>}{error && <p className="form-error">{error}</p>}</div></div></div></section></main>
+  const start = async () => { try { await api(`/rooms/${room.id}/start`, { method: 'POST' }, token); navigate('play') } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not start room') } }
+  return <main className="site-shell lobby-shell"><nav className="topbar"><button className="back-button" onClick={onBack}>← Operations</button><div className="brand-mark dark"><span className="brand-cross">+</span> AERIUM</div><div className="profile"><span className="online-dot" /> {user.displayName}</div></nav><section className="lobby-content"><div className="lobby-header"><div><p className="kicker">ROOM LOBBY / {room.id.slice(0, 8).toUpperCase()}</p><h1>{room.name}</h1><p className="muted">FLAG STEAL / {room.map}</p></div><span className={`room-status large ${room.status === 'waiting' ? 'open' : room.status}`}>{room.status === 'live' ? 'IN PROGRESS' : isFull ? 'ROOM FULL' : 'WAITING FOR PILOTS'}</span></div><div className="lobby-board"><div className="lobby-map"><div className="map-lines" /><span className="map-tag">FLAG STEAL</span><div className="map-coordinates">LIVE DATABASE<br />ROOM READY</div></div><div className="roster-panel"><div className="roster-title"><h2>Attendance</h2><span>{room.memberCount} / {room.maxMembers}</span></div><p className="form-hint">{isMember ? 'You are in this room. The game opens for every member when the creator starts it.' : 'Join to reserve your seat. Attendance updates live.'}</p><div className="lobby-actions">{!isCreator && !isMember && room.status === 'waiting' && <button className="button outline" onClick={join}>Join room</button>}{isCreator && <button className="button primary" disabled={!isFull || room.status !== 'waiting'} onClick={start}>{room.status !== 'waiting' ? 'Game started' : isFull ? 'Start game' : `Waiting for ${room.maxMembers - room.memberCount} more`}</button>}{error && <p className="form-error">{error}</p>}</div></div></div></section></main>
 }

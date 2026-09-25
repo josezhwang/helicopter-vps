@@ -13,7 +13,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   })
 
   async onModuleInit() {
-    await this.pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS "user" (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

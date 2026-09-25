@@ -8,7 +8,16 @@ import { RoomController } from './room.controller'
 import { RoomService } from './room.service'
 
 @Module({
-  imports: [GameModule, JwtModule.register({ secret: process.env.JWT_SECRET ?? 'change-this-development-secret', signOptions: { expiresIn: '7d' } })],
+  imports: [
+    GameModule,
+    JwtModule.registerAsync({
+      useFactory: () => {
+        const secret = process.env.JWT_SECRET
+        if (!secret) throw new Error('JWT_SECRET must be set in server/.env (see server/.env.example)')
+        return { secret, signOptions: { expiresIn: '7d' } }
+      },
+    }),
+  ],
   controllers: [AuthController, RoomController],
   providers: [DatabaseService, AuthService, RoomService],
 })
