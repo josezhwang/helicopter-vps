@@ -32,7 +32,8 @@ lerna-debug.log*
 .temp
 .tmp
 
-# Asset archives (the game uses the processed models in client/public/models)
+# Original source assets, kept locally only (the game uses the processed models in client/public/models)
+/environment_material/
 /environment_material.zip
 
 # Operating system and editor files
