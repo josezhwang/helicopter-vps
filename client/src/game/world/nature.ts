@@ -31,62 +31,6 @@ function instanced(geometry: THREE.BufferGeometry, material: THREE.Material, mat
 const compose = (x: number, y: number, z: number, euler: THREE.Euler, sx: number, sy: number, sz: number) =>
   new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromEuler(euler), new THREE.Vector3(sx, sy, sz))
 
-/** Reusable trunk + canopy materials shared by all trees (perf). */
-const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b4632, roughness: 1 })
-const canopyMats = [
-  new THREE.MeshStandardMaterial({ color: 0x3f6b2f, roughness: 1 }),
-  new THREE.MeshStandardMaterial({ color: 0x4c7a35, roughness: 1 }),
-  new THREE.MeshStandardMaterial({ color: 0x33592a, roughness: 1 }),
-]
-
-export function createForest(circles?: Array<{ x: number; z: number; r: number }>): THREE.Group {
-  const group = new THREE.Group()
-  const rng = mulberry32(20260924)
-
-  const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, 6, 6)
-  const coneGeo = new THREE.ConeGeometry(2.6, 7, 7)
-  const blobGeo = new THREE.IcosahedronGeometry(2.8, 1)
-  const trunks: THREE.Matrix4[] = []
-  const cones: THREE.Matrix4[][] = canopyMats.map(() => [])
-  const blobs: THREE.Matrix4[][] = canopyMats.map(() => [])
-
-  for (let i = 0; i < 260; i++) {
-    const x = (rng() * 2 - 1) * HALF_WORLD * 0.95
-    const z = (rng() * 2 - 1) * HALF_WORLD * 0.95
-
-    // Keep bases, spawn lanes and water clear
-    if (Math.hypot(x + 380, z + 380) < 60) continue
-    if (Math.hypot(x - 380, z - 380) < 60) continue
-    const h = heightAt(x, z)
-    if (h < 1.0) continue // no trees in low ground/water
-
-    const scale = 0.7 + rng() * 0.9
-    let canopy: { list: THREE.Matrix4[]; local: THREE.Matrix4 }
-    if (rng() > 0.35) {
-      canopy = { list: cones[Math.floor(rng() * canopyMats.length)], local: new THREE.Matrix4().makeTranslation(0, 8, 0) }
-    } else {
-      const list = blobs[Math.floor(rng() * canopyMats.length)]
-      const bx = 1 + rng() * 0.4
-      const by = 0.8 + rng() * 0.3
-      const bz = 1 + rng() * 0.4
-      canopy = { list, local: compose(0, 7.5, 0, new THREE.Euler(), bx, by, bz) }
-    }
-    const tree = compose(x, h - 0.2, z, new THREE.Euler(0, rng() * Math.PI * 2, 0), scale, scale, scale)
-    trunks.push(tree.clone().multiply(new THREE.Matrix4().makeTranslation(0, 3, 0)))
-    canopy.list.push(tree.clone().multiply(canopy.local))
-
-    // Solid trunk the player must walk around
-    circles?.push({ x, z, r: 0.6 * scale + 0.25 })
-  }
-
-  group.add(instanced(trunkGeo, trunkMat, trunks, true))
-  canopyMats.forEach((mat, i) => {
-    if (cones[i].length) group.add(instanced(coneGeo, mat, cones[i], true))
-    if (blobs[i].length) group.add(instanced(blobGeo, mat, blobs[i], true))
-  })
-  return group
-}
-
 type RockVariant = 'rock1' | 'rock2' | 'rock3' | 'rock4'
 const ROCK_VARIANTS: RockVariant[] = ['rock1', 'rock2', 'rock3', 'rock4']
 /** The rune stone is tall and thin; keep it a landmark rather than a tower. */
@@ -120,6 +64,7 @@ async function loadRockVariant(variant: RockVariant) {
 const ROCK_DRAW_DISTANCE = 600
 const ROCK_SHADOW_DISTANCE = 190
 const ROCK_REBUILD_STEP = 8
+const EXTRA_STONE_ATTEMPTS = 900
 
 export interface RockField {
   group: THREE.Group
@@ -157,11 +102,29 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
     if (scale > 1.4) circles?.push({ x, z, r: scale * 0.8 })
   }
 
+  // Extra stones, mostly small, gathered in loose clusters (own seed: the rocks above keep their places)
+  const extra = mulberry32(4444)
+  const clusters = (x: number, z: number) => 0.35 + 0.35 * Math.sin(x * 0.013 + 0.8) * Math.cos(z * 0.015 - 0.3) + 0.3 * Math.sin((x + z) * 0.031)
+  for (let i = 0; i < EXTRA_STONE_ATTEMPTS; i++) {
+    const x = (extra() * 2 - 1) * HALF_WORLD * 0.97
+    const z = (extra() * 2 - 1) * HALF_WORLD * 0.97
+    const keep = extra(), big = extra(), size = extra(), sy = extra(), sz = extra(), ry = extra() * Math.PI
+    if (keep > clusters(x, z)) continue
+    if (Math.hypot(x + 380, z + 380) < 58 || Math.hypot(x - 380, z - 380) < 58) continue
+    const h = heightAt(x, z)
+    if (h < -1) continue
+    const scale = big < 0.1 ? 1.6 + size * 1.0 : 0.35 + size * 1.0
+    const ys = scale * (0.6 + sy * 0.5), zs = scale * (0.8 + sz * 0.4)
+    rocks.push(compose(x, h + scale * 0.35, z, new THREE.Euler(0, ry, 0), scale, ys, zs))
+    placed.push({ x, h, z, scale, sy: ys, sz: zs, ry })
+    if (scale > 1.4) circles?.push({ x, z, r: scale * 0.8 })
+  }
+
   // Simple stand-in rocks until the real models load, so bullets are blocked from the first frame
   const standIn = instanced(geo, rockMat, rocks, true, true)
   group.add(standIn)
 
-  const sets: Array<{ near: THREE.InstancedMesh; far: THREE.InstancedMesh; rocks: Array<{ x: number; z: number; matrix: THREE.Matrix4 }> }> = []
+  const sets: Array<{ near: THREE.InstancedMesh; far: THREE.InstancedMesh; rocks: Array<{ x: number; z: number; scale: number; matrix: THREE.Matrix4 }> }> = []
   const last = new THREE.Vector3(Infinity, 0, Infinity)
   const rebuild = (camera: THREE.Vector3) => {
     last.copy(camera)
@@ -169,7 +132,8 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
       let near = 0, far = 0
       for (const rock of set.rocks) {
         const d = Math.hypot(rock.x - camera.x, rock.z - camera.z)
-        if (d > ROCK_DRAW_DISTANCE) continue
+        // Small stones are dots long before big rocks are: draw distance grows with size
+        if (d > Math.min(ROCK_DRAW_DISTANCE, 90 + rock.scale * 190)) continue
         if (d < ROCK_SHADOW_DISTANCE) set.near.setMatrixAt(near++, rock.matrix)
         else set.far.setMatrixAt(far++, rock.matrix)
       }
@@ -183,12 +147,13 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
   }
 
   void Promise.all(ROCK_VARIANTS.map(loadRockVariant)).then((loaded) => {
-    const byVariant = new Map(ROCK_VARIANTS.map((v, i) => [v, { ...loaded[i], rocks: [] as Array<{ x: number; z: number; matrix: THREE.Matrix4 }> }]))
+    const byVariant = new Map(ROCK_VARIANTS.map((v, i) => [v, { ...loaded[i], rocks: [] as Array<{ x: number; z: number; scale: number; matrix: THREE.Matrix4 }> }]))
     placed.forEach((r, i) => {
       // Real rocks stay upright (a random tilt would put moss underneath), sunk a little into the slope
       byVariant.get(rockVariant(i, r.scale))!.rocks.push({
         x: r.x,
         z: r.z,
+        scale: r.scale,
         matrix: compose(r.x, r.h - 0.12 * r.scale, r.z, new THREE.Euler(0, r.ry * 2, 0), r.scale, r.sy, r.sz),
       })
     })
@@ -275,8 +240,10 @@ export function createClouds(): THREE.Group {
 const GRASS_URL = '/models/grass.glb'
 /** Grass is purely visual: drawn only near the camera, in square chunks so off-screen/far ones are skipped. */
 const GRASS_CHUNK = 64
-const GRASS_DRAW_DISTANCE = 110
-const GRASS_CLUMPS = 14000
+const GRASS_DRAW_DISTANCE = 120
+/** Within this distance every clump is drawn; further out only every other one. */
+const GRASS_FULL_DENSITY_DISTANCE = 55
+const GRASS_CLUMPS = 34000
 const GRASS_HEIGHT = 0.9
 
 export interface GrassField {
@@ -291,7 +258,7 @@ export function createGrass(exclude: (x: number, z: number) => boolean): GrassFi
   const rng = mulberry32(9090)
   // Large, soft patches: 0 = bare, 1 = meadow
   const meadow = (x: number, z: number) =>
-    THREE.MathUtils.clamp(0.55 + 0.35 * Math.sin(x * 0.021 + 1.3) * Math.cos(z * 0.017 - 0.7) + 0.25 * Math.sin((x + z) * 0.043) + 0.15 * Math.cos((x - z) * 0.09), 0, 1)
+    THREE.MathUtils.clamp(0.8 + 0.25 * Math.sin(x * 0.021 + 1.3) * Math.cos(z * 0.017 - 0.7) + 0.2 * Math.sin((x + z) * 0.043) + 0.1 * Math.cos((x - z) * 0.09), 0, 1)
   const chunks = new Map<string, { cx: number; cz: number; matrices: THREE.Matrix4[] }>()
   let placed = 0
   for (let attempt = 0; attempt < GRASS_CLUMPS * 6 && placed < GRASS_CLUMPS; attempt++) {
@@ -302,7 +269,7 @@ export function createGrass(exclude: (x: number, z: number) => boolean): GrassFi
     const size = 0.7 + rng() * 0.65
     if (keep > meadow(x, z)) continue
     const h = heightAt(x, z)
-    if (h < 0.8 || exclude(x, z)) continue
+    if (h < -1.8 || exclude(x, z)) continue
     const cx = Math.floor(x / GRASS_CHUNK)
     const cz = Math.floor(z / GRASS_CHUNK)
     const key = `${cx},${cz}`
@@ -312,7 +279,7 @@ export function createGrass(exclude: (x: number, z: number) => boolean): GrassFi
     placed++
   }
 
-  const meshes: Array<{ mesh: THREE.InstancedMesh; cx: number; cz: number }> = []
+  const meshes: Array<{ mesh: THREE.InstancedMesh; cx: number; cz: number; fullOnly: boolean }> = []
   void loadModel(GRASS_URL).then((gltf) => {
     const part = firstMeshGeometry(gltf.scene)
     if (!part) return
@@ -327,20 +294,26 @@ export function createGrass(exclude: (x: number, z: number) => boolean): GrassFi
     // Lifted a little so clumps blend with the terrain instead of reading as dark specks from afar
     const material = new THREE.MeshLambertMaterial({ map: source.map ?? null, color: 0xf2ffd8, emissive: 0x1c2a12, alphaTest: 0.45, side: THREE.DoubleSide })
     for (const chunk of chunks.values()) {
-      const mesh = instanced(geometry, material, chunk.matrices, false)
-      // Walk-through decoration: never blocks bullets or the player
-      mesh.raycast = () => {}
-      mesh.visible = false
-      group.add(mesh)
-      meshes.push({ mesh, cx: chunk.cx, cz: chunk.cz })
+      // Two halves per chunk: the second half is only drawn close to the camera
+      for (const [half, fullOnly] of [[0, false], [1, true]] as const) {
+        const matrices = chunk.matrices.filter((_, i) => i % 2 === half)
+        if (!matrices.length) continue
+        const mesh = instanced(geometry, material, matrices, false)
+        // Walk-through decoration: never blocks bullets or the player
+        mesh.raycast = () => {}
+        mesh.visible = false
+        group.add(mesh)
+        meshes.push({ mesh, cx: chunk.cx, cz: chunk.cz, fullOnly })
+      }
     }
   }).catch((error) => console.error('[nature] grass model failed to load:', error))
 
   const reach = GRASS_DRAW_DISTANCE + GRASS_CHUNK * 0.71
+  const fullReach = GRASS_FULL_DENSITY_DISTANCE + GRASS_CHUNK * 0.71
   return {
     group,
     update(camera) {
-      for (const { mesh, cx, cz } of meshes) mesh.visible = Math.hypot(camera.x - cx, camera.z - cz) < reach
+      for (const { mesh, cx, cz, fullOnly } of meshes) mesh.visible = Math.hypot(camera.x - cx, camera.z - cz) < (fullOnly ? fullReach : reach)
     },
   }
 }

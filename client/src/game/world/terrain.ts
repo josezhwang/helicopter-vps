@@ -21,7 +21,7 @@ export function createTerrain(): THREE.Mesh {
   const pos = geometry.attributes.position as THREE.BufferAttribute
   const colors = new Float32Array(pos.count * 3)
 
-  const grass = new THREE.Color(0x4e7a3a)
+  const grass = new THREE.Color(0x4a8236)
   const dry = new THREE.Color(0x8a7f4f)
   const dirt = new THREE.Color(0x6b543c)
   const rock = new THREE.Color(0x7d7f82)
@@ -35,10 +35,11 @@ export function createTerrain(): THREE.Mesh {
     pos.setY(i, h)
 
     tmp.copy(grass)
-    if (h > 14) tmp.lerp(rock, THREE.MathUtils.clamp((h - 14) / 18, 0, 1))
-    if (h < 1.5) tmp.lerp(sand, THREE.MathUtils.clamp((1.5 - h) / 3, 0, 1))
+    // Mostly green land: rock only on the highest hills, sand only right at the water
+    if (h > 18) tmp.lerp(rock, THREE.MathUtils.clamp((h - 18) / 16, 0, 1))
+    if (h < -1.5) tmp.lerp(sand, THREE.MathUtils.clamp((-1.5 - h) / 2, 0, 1))
     const noise = Math.sin(x * 0.05) * Math.cos(z * 0.043) * 0.5 + Math.sin((x + z) * 0.021) * 0.5
-    tmp.lerp(dry, THREE.MathUtils.clamp(0.25 + noise * 0.2, 0, 1))
+    tmp.lerp(dry, THREE.MathUtils.clamp(0.08 + noise * 0.1, 0, 1))
     if (Math.abs(x + z) > 660) tmp.lerp(dirt, 0.15)
 
     colors[i * 3] = tmp.r

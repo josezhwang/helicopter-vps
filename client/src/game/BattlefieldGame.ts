@@ -1,7 +1,8 @@
 import * as THREE from 'three'
 import { createTerrain, createWater, createSkyAndLights, heightAt, SHADOW_RANGE, SUN_OFFSET, FOG_FAR } from './world/terrain'
 import { createBase, GEM_LOCAL, turretPlacements, BASE_HALF, type BaseObjects, type Team } from './world/bases'
-import { createForest, createRocks, createBushes, createClouds, createGrass, type GrassField, type RockField } from './world/nature'
+import { createRocks, createBushes, createClouds, createGrass, type GrassField, type RockField } from './world/nature'
+import { createForest, type ForestField } from './world/forest'
 import { createTurrets, type TurretField } from './world/turrets'
 import { createHelicopter, HELI_SEAT_OFFSET, type Helicopter } from './world/helicopter'
 import { Player, EYE_HEIGHT } from './world/player'
@@ -76,6 +77,7 @@ export class BattlefieldGame {
   private turrets: TurretField
   private grass: GrassField
   private rocks: RockField
+  private forest: ForestField
   private input = {
     forward: false,
     back: false,
@@ -131,9 +133,11 @@ export class BattlefieldGame {
     const worldCircles: Array<{ x: number; z: number; r: number }> = []
     this.scene.add(terrain)
     this.scene.add(createWater())
-    const forest = createForest(worldCircles)
+    // Rocks first, so trees can keep clear of them
     this.rocks = createRocks(worldCircles)
-    this.scene.add(forest)
+    const baseSpots = [new THREE.Vector3(-380, 0, -380), new THREE.Vector3(380, 0, 380)]
+    this.forest = createForest(this.renderer, worldCircles, (x, z) => baseSpots.some((b) => Math.hypot(x - b.x, z - b.z) < 70))
+    this.scene.add(this.forest.group)
     this.scene.add(this.rocks.group)
     this.scene.add(createBushes(worldCircles))
     this.scene.add(createClouds())
@@ -199,7 +203,7 @@ export class BattlefieldGame {
 
     // Everything that stops a bullet: terrain, bases, trees, rocks, helicopters, machine guns (player avatars are
     // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
-    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, forest, this.rocks.group, this.helis.blue.object, this.helis.red.object, this.turrets.group]
+    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.helis.blue.object, this.helis.red.object, this.turrets.group]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
@@ -918,6 +922,7 @@ export class BattlefieldGame {
       this.turrets.update(time, this.camera.position)
       this.grass.update(this.camera.position)
       this.rocks.update(this.camera.position)
+      this.forest.update(this.camera.position)
       this.updateGemVisibility()
       // Real time, not the capped frame dt, so slow machines don't fall behind
       const now = performance.now()
