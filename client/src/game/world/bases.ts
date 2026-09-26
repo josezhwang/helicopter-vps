@@ -137,22 +137,6 @@ export function createBase(team: Team, position: THREE.Vector3): BaseObjects {
   gem.group.position.copy(GEM_LOCAL)
   colliders.push(gem.collider.clone().translate(GEM_LOCAL))
 
-  // --- Helipad ---
-  const pad = new THREE.Mesh(
-    new THREE.CylinderGeometry(9, 9, 0.6, 24),
-    new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.95 }),
-  )
-  pad.position.set(20, 0.3, -18)
-  pad.receiveShadow = true
-  group.add(pad)
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(7, 0.25, 8, 32),
-    new THREE.MeshStandardMaterial({ color: colors.accent, emissive: colors.accent, emissiveIntensity: 0.35 }),
-  )
-  ring.rotation.x = Math.PI / 2
-  ring.position.set(20, 0.65, -18)
-  group.add(ring)
-
   // --- Supply crates + sandbags for life ---
   const crateMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3a, roughness: 0.9 })
   const sandbagMat = new THREE.MeshStandardMaterial({ color: 0x9a8f6a, roughness: 1 })

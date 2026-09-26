@@ -116,6 +116,7 @@ export function Hud() {
           color: '#cfe6ff',
           fontSize: 14,
           lineHeight: 1.5,
+          maxWidth: 440,
         }}
       >
         <div style={{ marginBottom: 8 }}>
@@ -137,8 +138,15 @@ export function Hud() {
         <div style={{ fontSize: 18, color: '#8fd0ff' }}>
           {state.reloading ? 'RELOADING…' : `AMMO ${state.ammo} / ${state.maxAmmo}`}
         </div>
-        {state.inHelicopter && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}
-        <div style={{ opacity: 0.85 }}>{state.inHelicopter ? 'HELICOPTER — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · LMB fire · E exit' : 'WASD move · Shift sprint · Space jump · E helicopter · LMB shoot'}</div>
+        {state.vehicle === 'heli' && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}
+        {state.vehicle === 'car' && <div style={{ fontSize: 16, color: '#ffe08f' }}>{state.speedKmh} km/h</div>}
+        <div style={{ opacity: 0.85 }}>
+          {state.vehicle === 'heli'
+            ? 'HELICOPTER — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · LMB fire (cockpit) · E exit'
+            : state.vehicle === 'car'
+              ? 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse look · V view · LMB fire (gunner) · E exit'
+              : 'WASD move · Shift sprint · Space jump · E vehicle · LMB shoot'}
+        </div>
       </div>
 
       <div
@@ -160,7 +168,7 @@ export function Hud() {
         <div style={{ opacity: 0.85 }}>
           {state.carryingGem ? `💎 CARRYING ENEMY GEM — bring it to your ${(team ?? 'blue').toUpperCase()} gem!` : 'Steal the enemy gem'}
         </div>
-        {state.nearHelicopter && !state.inHelicopter && <div style={{ color: '#8fd0ff' }}>[E] Board helicopter</div>}
+        {state.nearVehicle && !state.vehicle && <div style={{ color: '#8fd0ff' }}>[E] {state.nearVehicle === 'heli' ? 'Board helicopter' : 'Drive battle car'}</div>}
       </div>
 
       <div

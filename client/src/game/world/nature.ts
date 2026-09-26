@@ -73,7 +73,8 @@ export interface RockField {
   update: (camera: THREE.Vector3) => void
 }
 
-export function createRocks(circles?: Array<{ x: number; z: number; r: number }>): RockField {
+/** `avoid` keeps spots clear (vehicle pads); it is checked after each rock's random draws so the others keep their places. */
+export function createRocks(circles?: Array<{ x: number; z: number; r: number }>, avoid?: (x: number, z: number) => boolean): RockField {
   const group = new THREE.Group()
   const rng = mulberry32(777)
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x83868c, roughness: 1 })
@@ -95,6 +96,7 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
     const rx = rng() * Math.PI
     const ry = rng() * Math.PI
     const rz = rng() * Math.PI
+    if (avoid?.(x, z)) continue
     rocks.push(compose(x, h + scale * 0.35, z, new THREE.Euler(rx, ry, rz), scale, sy, sz))
     placed.push({ x, h, z, scale, sy, sz, ry })
 
@@ -112,7 +114,7 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
     if (keep > clusters(x, z)) continue
     if (Math.hypot(x + 380, z + 380) < 58 || Math.hypot(x - 380, z - 380) < 58) continue
     const h = heightAt(x, z)
-    if (h < -1) continue
+    if (h < -1 || avoid?.(x, z)) continue
     const scale = big < 0.1 ? 1.6 + size * 1.0 : 0.35 + size * 1.0
     const ys = scale * (0.6 + sy * 0.5), zs = scale * (0.8 + sz * 0.4)
     rocks.push(compose(x, h + scale * 0.35, z, new THREE.Euler(0, ry, 0), scale, ys, zs))
@@ -180,7 +182,7 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
   }
 }
 
-export function createBushes(circles?: Array<{ x: number; z: number; r: number }>): THREE.Group {
+export function createBushes(circles?: Array<{ x: number; z: number; r: number }>, avoid?: (x: number, z: number) => boolean): THREE.Group {
   const group = new THREE.Group()
   const rng = mulberry32(4242)
   const bushMat = new THREE.MeshStandardMaterial({ color: 0x5d7a3d, roughness: 1 })
@@ -196,7 +198,9 @@ export function createBushes(circles?: Array<{ x: number; z: number; r: number }
     if (h < 0.5) continue
 
     const scale = 0.5 + rng() * 1.3
-    bushes.push(compose(x, h + scale * 0.5, z, new THREE.Euler(0, rng() * Math.PI, 0), scale * 1.4, scale * 0.8, scale * 1.4))
+    const turn = rng() * Math.PI
+    if (avoid?.(x, z)) continue
+    bushes.push(compose(x, h + scale * 0.5, z, new THREE.Euler(0, turn, 0), scale * 1.4, scale * 0.8, scale * 1.4))
     circles?.push({ x, z, r: scale * 0.95 })
   }
 

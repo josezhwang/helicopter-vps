@@ -7,11 +7,18 @@ import { RoomService, Team } from './room.service'
 
 type Vec3 = [number, number, number]
 
+interface VehicleState {
+  id: string
+  p: Vec3
+  r: Vec3
+  spin: number
+}
+
 interface PlayerState {
   p: Vec3
   yaw: number
   pitch: number
-  heli: { p: Vec3; r: Vec3; rpm: number } | null
+  vehicle: VehicleState | null
   flag: boolean
   hp: number
 }
@@ -35,6 +42,8 @@ interface Vitals {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** Each team has 5 helicopters and 5 battle cars; must match client/src/game/world/vehicles.ts */
+const VEHICLE_ID = /^(blue|red)-(heli|car)-[0-4]$/
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
 // Gem pedestal world XZ per team; must match the client (bases at ±380, GEM_LOCAL = base-local x -12)
@@ -70,16 +79,17 @@ function parseState(raw: unknown): PlayerState | null {
   const pitch = num(s.pitch, -Math.PI, Math.PI)
   const hp = num(s.hp, 0, 100)
   if (!p || yaw === null || pitch === null || hp === null) return null
-  let heli: PlayerState['heli'] = null
-  if (s.heli && typeof s.heli === 'object') {
-    const h = s.heli as Record<string, unknown>
-    const hp3 = vec(h.p, 500)
-    const r = vec(h.r, 1e4, -1e4, 1e4)
-    const rpm = num(h.rpm, 0, 100)
-    if (!hp3 || !r || rpm === null) return null
-    heli = { p: hp3, r, rpm }
+  let vehicle: VehicleState | null = null
+  if (s.vehicle && typeof s.vehicle === 'object') {
+    const v = s.vehicle as Record<string, unknown>
+    const id = typeof v.id === 'string' && VEHICLE_ID.test(v.id) ? v.id : null
+    const vp = vec(v.p, 500)
+    const r = vec(v.r, 1e4, -1e4, 1e4)
+    const spin = num(v.spin, -100, 100)
+    if (!id || !vp || !r || spin === null) return null
+    vehicle = { id, p: vp, r, spin }
   }
-  return { p, yaw, pitch, heli, flag: s.flag === true, hp }
+  return { p, yaw, pitch, vehicle, flag: s.flag === true, hp }
 }
 
 @Injectable()
@@ -87,6 +97,8 @@ export class RealtimeService implements OnModuleDestroy {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 })
   private readonly rooms = new Map<string, Map<string, Connection>>()
   private readonly vitals = new Map<string, Map<string, Vitals>>()
+  /** Where each vehicle was last seen per room, so players joining later see parked vehicles where they were left. */
+  private readonly vehiclePoses = new Map<string, Map<string, { p: Vec3; r: Vec3 }>>()
   private heartbeat?: NodeJS.Timeout
 
   constructor(private readonly auth: AuthService, private readonly roomService: RoomService) {}
@@ -146,6 +158,11 @@ export class RealtimeService implements OnModuleDestroy {
         if (!state) return
         conn.lastStateAt = now
         state.hp = this.vitalsOf(roomId, conn.userId).hp
+        if (state.vehicle && !this.claimVehicle(roomId, conn, state.vehicle)) {
+          // Own team's vehicles only, one player per vehicle: whoever was in it first keeps it
+          this.send(conn.ws, { type: 'eject', vehicle: state.vehicle.id })
+          state.vehicle = null
+        }
         conn.state = state
         this.broadcast(roomId, { type: 'state', id: conn.userId, s: state }, conn.userId)
       } else if (message.type === 'shot') {
@@ -198,10 +215,21 @@ export class RealtimeService implements OnModuleDestroy {
       const vitals = this.vitalsOf(roomId, player.id)
       return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null, hp: vitals.hp, dead: vitals.dead }
     })
-    this.send(ws, { type: 'welcome', you: user.id, players })
+    this.send(ws, { type: 'welcome', you: user.id, players, vehicles: Object.fromEntries(this.vehiclePoses.get(roomId) ?? []) })
     const myVitals = this.vitalsOf(roomId, user.id)
     this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null, hp: myVitals.hp, dead: myVitals.dead } }, user.id)
     return { roomId, conn }
+  }
+
+  private claimVehicle(roomId: string, conn: Connection, vehicle: VehicleState) {
+    if (!vehicle.id.startsWith(`${conn.team}-`)) return false
+    for (const other of this.rooms.get(roomId)?.values() ?? []) {
+      if (other !== conn && other.state?.vehicle?.id === vehicle.id && !this.vitalsOf(roomId, other.userId).dead) return false
+    }
+    let poses = this.vehiclePoses.get(roomId)
+    if (!poses) this.vehiclePoses.set(roomId, (poses = new Map()))
+    poses.set(vehicle.id, { p: vehicle.p, r: vehicle.r })
+    return true
   }
 
   private vitalsOf(roomId: string, userId: string): Vitals {
@@ -215,6 +243,7 @@ export class RealtimeService implements OnModuleDestroy {
   private clearVitals(roomId: string) {
     for (const vitals of this.vitals.get(roomId)?.values() ?? []) clearTimeout(vitals.respawnTimer)
     this.vitals.delete(roomId)
+    this.vehiclePoses.delete(roomId)
   }
 
   /** Relay a fired shot so everyone else sees the muzzle flash and tracer. */
@@ -238,8 +267,8 @@ export class RealtimeService implements OnModuleDestroy {
 
     const now = Date.now()
     if (now - shooterVitals.lastShotAt < weapon.fireRate * 1000 * FIRE_RATE_SLACK) return
-    const from = shooter.state.heli?.p ?? shooter.state.p
-    const to = target.state.heli?.p ?? target.state.p
+    const from = shooter.state.vehicle?.p ?? shooter.state.p
+    const to = target.state.vehicle?.p ?? target.state.p
     if (Math.hypot(from[0] - to[0], from[1] - to[1], from[2] - to[2]) > weapon.range + RANGE_SLACK) return
     shooterVitals.lastShotAt = now
 
@@ -249,6 +278,8 @@ export class RealtimeService implements OnModuleDestroy {
 
     targetVitals.dead = true
     target.state.flag = false
+    // A dead player's vehicle is free again (it stays where it was)
+    target.state.vehicle = null
     this.broadcast(roomId, { type: 'killed', id: target.userId, by: shooter.userId })
     targetVitals.respawnTimer = setTimeout(() => {
       targetVitals.hp = MAX_HP
@@ -259,7 +290,7 @@ export class RealtimeService implements OnModuleDestroy {
 
   private async capture(roomId: string, conn: Connection) {
     const state = conn.state
-    if (!state?.flag || state.heli || this.vitalsOf(roomId, conn.userId).dead) return
+    if (!state?.flag || state.vehicle || this.vitalsOf(roomId, conn.userId).dead) return
     const [fx, fz] = GEM_PEDESTAL[conn.team]
     if (Math.hypot(state.p[0] - fx, state.p[2] - fz) > CAPTURE_RADIUS) return
     if (!(await this.roomService.finish(roomId))) return

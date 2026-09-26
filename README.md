@@ -43,9 +43,17 @@ Players open the site at `http://<server-ip>:5173`; the client calls the API on 
 
 - **Mouse** — look, **Left click** — shoot, **R** — reload
 - **WASD** — move, **Shift** — sprint, **Space** — jump
-- **E** — enter / exit the Apache helicopter (near the helipad at your base)
-- In helicopter: **W/S** forward/back, **A/D** turn, **Space** climb, **Shift/C** descend
+- **E** — get into / out of one of your team's vehicles: 5 helicopters on the pads behind your base, 5 battle cars parked beside it. One player per vehicle; shooting an occupied enemy vehicle hurts whoever is inside.
+- In a helicopter: **Space** spins the rotor up (**Shift** down), then **W/S** forward/back, **A/D** turn, **↑/↓** altitude, **←/→** roll, **V** cockpit / chase view, **Left click** fires from the cockpit
+- In a battle car: **W/S** drive / reverse, **A/D** steer, **Space** brake, **mouse** look around, **V** chase / roof-gun view, **Left click** fires from the roof gun
 
 ## Goal
 
-Steal the red flag from the enemy base and carry it back to your blue base to score.
+Steal the enemy team's gem from their base and carry it back to your own gem to win (on foot for the last step: you can't capture from inside a vehicle).
+
+## Credits
+
+3D models used under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) (simplified and re-textured for the game):
+
+- "MD-500 Defender Helicopter" by [Duane's Mind](https://sketchfab.com/duanesmind) — [source](https://sketchfab.com/3d-models/md-500-defender-helicopter-da5daae0fe354269895b58c2ed72e2b8)
+- "Shadow - metal war online" by [Vyacheslav](https://sketchfab.com/Vedunov.s) — [source](https://sketchfab.com/3d-models/shadow-metal-war-online-63ec56441bed458e98fb74dc6bd08575)

@@ -1,6 +1,6 @@
 import type { Team } from './world/bases'
 
-export type PlayerStatus = 'on foot' | 'flying' | 'carrying gem' | 'dead' | 'offline'
+export type PlayerStatus = 'on foot' | 'flying' | 'driving' | 'carrying gem' | 'dead' | 'offline'
 
 export interface RosterEntry {
   id: string
@@ -15,14 +15,17 @@ export interface GameState {
   ammo: number
   maxAmmo: number
   reloading: boolean
-  inHelicopter: boolean
-  nearHelicopter: boolean
+  /** What we are flying/driving, if anything, and what we could board with [E]. */
+  vehicle: 'heli' | 'car' | null
+  nearVehicle: 'heli' | 'car' | null
   nearPickupLabel: string
   carryingGem: boolean
   score: number
   message: string
   /** Rotor RPM while piloting (0–1000, viewer-style x10 readout). */
   rotorRpm: number
+  /** Car speed while driving, km/h. */
+  speedKmh: number
   /** Player health — starts at 100. */
   health: number
   weaponName: string
@@ -45,12 +48,13 @@ const INITIAL_STATE: GameState = {
   ammo: 12,
   maxAmmo: 12,
   reloading: false,
-  inHelicopter: false,
-  nearHelicopter: false,
+  vehicle: null,
+  nearVehicle: null,
   nearPickupLabel: '',
   carryingGem: false,
   score: 0,
   rotorRpm: 0,
+  speedKmh: 0,
   health: 100,
   weaponName: 'Primary Handgun',
   weaponPower: 5,
