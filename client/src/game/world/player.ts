@@ -28,8 +28,8 @@ export class Player {
   private colliders: THREE.Box3[] = []
   /** Tall solid circles: tree trunks, boulders — {worldX, worldZ, radius}. */
   private circles: Array<{ x: number; z: number; r: number }> = []
-  /** Dynamic circle (the parked helicopter) refreshed each frame by the game. */
-  private extraCircle: { x: number; z: number; r: number } | null = null
+  /** Moving obstacles (other players, parked helicopters) refreshed each frame by the game. */
+  private dynamicCircles: Array<{ x: number; z: number; r: number }> = []
 
   constructor(camera: THREE.PerspectiveCamera) {
     this.camera = camera
@@ -43,8 +43,8 @@ export class Player {
     this.circles = circles
   }
 
-  setExtraCircle(x: number, z: number, r: number) {
-    this.extraCircle = { x, z, r }
+  setDynamicCircles(circles: Array<{ x: number; z: number; r: number }>) {
+    this.dynamicCircles = circles
   }
 
   spawn(position: THREE.Vector3) {
@@ -115,9 +115,7 @@ export class Player {
     }
 
     // --- Circle collision: trees, boulders, parked helicopter ---
-    const allCircles = this.extraCircle
-      ? [...this.circles, this.extraCircle]
-      : this.circles
+    const allCircles = this.dynamicCircles.length ? [...this.circles, ...this.dynamicCircles] : this.circles
     for (const c of allCircles) {
       const dx = next.x - c.x
       const dz = next.z - c.z

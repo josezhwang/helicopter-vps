@@ -1,48 +1,40 @@
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { heightAt } from './terrain'
+import { createGemStand, type GemStand } from './gem'
+import type { TurretPlacement } from './turrets'
 
 export type Team = 'blue' | 'red'
 
 export const BASE_HALF = 42 // base walls span ±BASE_HALF around the center
 
-export function flagPoleHeight(): number {
-  return 22
-}
+/** Where each base's gem sits, in base-local space (the server's capture check uses the same spot). */
+export const GEM_LOCAL = new THREE.Vector3(-12, 0, 0)
 
 export interface BaseObjects {
   group: THREE.Group
-  flagCloth: THREE.Mesh
-  flagState: { waving: boolean; carried: boolean; base: Team }
+  gem: GemStand
   colliders: THREE.Box3[]
-  flagTip: THREE.Object3D
 }
 
 const BLUE = {
   wall: 0x5d6d80,
   accent: 0x2e6fbd,
-  cloth: 0x2e6fbd,
 }
 
 const RED = {
   wall: 0x7d5a52,
   accent: 0xb03a2e,
-  cloth: 0xb03a2e,
 }
 
-function makeFlagCloth(team: Team): THREE.Mesh {
-  const colors = team === 'blue' ? BLUE : RED
-  const geometry = new THREE.PlaneGeometry(10, 6, 12, 6)
-  geometry.translate(5, 0, 0) // pivot at pole edge
-  const material = new THREE.MeshStandardMaterial({
-    color: colors.cloth,
-    side: THREE.DoubleSide,
-    roughness: 0.8,
-    emissive: colors.cloth,
-    emissiveIntensity: 0.08,
-  })
-  const mesh = new THREE.Mesh(geometry, material)
-  mesh.castShadow = true
-  return mesh
+/**
+ * Machine-gun emplacements just outside the walls, barrels pointing away from the base: left, right,
+ * back, and one on each side of the gate. All within ~51m of the centre, where no trees/rocks/bushes grow.
+ */
+export function turretPlacements(team: Team, center: THREE.Vector3): TurretPlacement[] {
+  const g = team === 'blue' ? 1 : -1 // blue's gate faces +X, red's faces -X
+  const local: Array<[number, number]> = [[0, 50], [0, -50], [-50 * g, 0], [47 * g, 19], [47 * g, -19]]
+  return local.map(([x, z]) => ({ x: center.x + x, z: center.z + z, facing: Math.atan2(x, z) }))
 }
 
 export function createBase(team: Team, position: THREE.Vector3): BaseObjects {
@@ -140,22 +132,10 @@ export function createBase(team: Team, position: THREE.Vector3): BaseObjects {
   group.add(bunker)
   colliders.push(new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(0, 4.5, 0), new THREE.Vector3(17, 9, 13)))
 
-  // --- Flagpole in front of bunker ---
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.8, roughness: 0.3 })
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, flagPoleHeight(), 10), poleMat)
-  pole.position.set(-12, flagPoleHeight() / 2, 0)
-  pole.castShadow = true
-  group.add(pole)
-
-  const flagCloth = makeFlagCloth(team)
-  flagCloth.position.set(-12, flagPoleHeight() - 5, 0)
-  group.add(flagCloth)
-
-  const flagTip = new THREE.Object3D()
-  flagTip.position.set(-12, flagPoleHeight() - 5, 0)
-  group.add(flagTip)
-
-  const flagState = { waving: true, carried: false, base: team }
+  // --- Gem pedestal in front of the bunker (added after the static merge below: it animates) ---
+  const gem = createGemStand(team)
+  gem.group.position.copy(GEM_LOCAL)
+  colliders.push(gem.collider.clone().translate(GEM_LOCAL))
 
   // --- Helipad ---
   const pad = new THREE.Mesh(
@@ -198,22 +178,40 @@ export function createBase(team: Team, position: THREE.Vector3): BaseObjects {
     box.translate(new THREE.Vector3(group.position.x, group.position.y, group.position.z))
   }
 
-  return { group, flagCloth, flagState, colliders, flagTip }
+  mergeStaticMeshes(group, new Set())
+  group.add(gem.group)
+
+  return { group, gem, colliders }
 }
 
-/** Rebuild flag cloth vertices for a gentle waving animation. */
-export function animateFlag(flag: BaseObjects, time: number, worldPos: THREE.Vector3) {
-  const cloth = flag.flagCloth
-  if (flag.flagState.carried) return
-  const geometry = cloth.geometry as THREE.PlaneGeometry
-  const pos = geometry.attributes.position as THREE.BufferAttribute
-  const width = 10
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i)
-    const amp = (x / width) * 0.9
-    pos.setZ(i, Math.sin(time * 4 + x * 0.8 + worldPos.x * 0.1) * amp + Math.sin(time * 2.3 + x * 0.5) * amp * 0.4)
+/**
+ * Walls, towers, crates… never move, so merge them into one mesh per material (a handful of draw calls
+ * instead of ~45 per base). Colliders were already built from the individual meshes.
+ */
+function mergeStaticMeshes(group: THREE.Group, keep: Set<THREE.Object3D>) {
+  group.updateMatrixWorld(true)
+  const toGroup = new THREE.Matrix4().copy(group.matrixWorld).invert()
+  const buckets = new Map<string, { material: THREE.Material; cast: boolean; receive: boolean; geometries: THREE.BufferGeometry[] }>()
+  const merged: THREE.Mesh[] = []
+  group.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh || keep.has(mesh) || Array.isArray(mesh.material)) return
+    const key = `${mesh.material.uuid}|${mesh.castShadow}|${mesh.receiveShadow}`
+    let bucket = buckets.get(key)
+    if (!bucket) buckets.set(key, (bucket = { material: mesh.material, cast: mesh.castShadow, receive: mesh.receiveShadow, geometries: [] }))
+    bucket.geometries.push(mesh.geometry.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(toGroup, mesh.matrixWorld)))
+    merged.push(mesh)
+  })
+  for (const mesh of merged) mesh.removeFromParent()
+  for (const bucket of buckets.values()) {
+    const geometry = mergeGeometries(bucket.geometries)
+    for (const g of bucket.geometries) g.dispose()
+    if (!geometry) continue
+    const mesh = new THREE.Mesh(geometry, bucket.material)
+    mesh.castShadow = bucket.cast
+    mesh.receiveShadow = bucket.receive
+    group.add(mesh)
   }
-  pos.needsUpdate = true
 }
 
 // Deterministic PRNG so both clients/worlds build identically.

@@ -8,6 +8,7 @@ export interface NetState {
   yaw: number
   pitch: number
   heli: { p: Vec3; r: Vec3; rpm: number } | null
+  /** Carrying the enemy team's gem (named `flag` from before gems replaced flags). */
   flag: boolean
   hp: number
 }

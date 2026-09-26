@@ -37,8 +37,8 @@ interface Vitals {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
-// Flagpole world XZ per team; must match the client world layout (bases at ±380, pole at local x = -12)
-const FLAGPOLE: Record<Team, [number, number]> = { blue: [-392, -380], red: [368, 380] }
+// Gem pedestal world XZ per team; must match the client (bases at ±380, GEM_LOCAL = base-local x -12)
+const GEM_PEDESTAL: Record<Team, [number, number]> = { blue: [-392, -380], red: [368, 380] }
 const MAX_HP = 100
 const RESPAWN_MS = 5000
 // Mirrors client/src/game/world/weapons.ts; the server never trusts client-sent damage
@@ -260,7 +260,7 @@ export class RealtimeService implements OnModuleDestroy {
   private async capture(roomId: string, conn: Connection) {
     const state = conn.state
     if (!state?.flag || state.heli || this.vitalsOf(roomId, conn.userId).dead) return
-    const [fx, fz] = FLAGPOLE[conn.team]
+    const [fx, fz] = GEM_PEDESTAL[conn.team]
     if (Math.hypot(state.p[0] - fx, state.p[2] - fz) > CAPTURE_RADIUS) return
     if (!(await this.roomService.finish(roomId))) return
     this.broadcast(roomId, { type: 'end', winner: conn.team, by: conn.userId })

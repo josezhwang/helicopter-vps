@@ -85,8 +85,9 @@ input:focus, select:focus { border-color: #4d8f75; box-shadow: 0 0 0 3px rgba(77
 .room-card { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 18px; border: 1px solid #d7e0d8; background: rgba(255,255,255,.57); transition: border-color .16s, transform .16s; }
 .room-card:hover { border-color: #9fbea9; transform: translateX(3px); }
 .room-icon { display: grid; place-items: center; width: 46px; height: 46px; border: 1px solid #b4cfbc; color: #4e9271; font-size: 18px; }
-.room-title { display: flex; align-items: center; gap: 12px; }
-.room-title h3 { margin: 0; color: #24473b; font-size: 15px; }
+.room-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.room-title h3 { margin: 0; min-width: 0; overflow: hidden; color: #24473b; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.room-info { min-width: 0; }
 .room-status { padding: 4px 7px; border-radius: 2px; color: #4f896c; background: #e1efe3; font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: .07em; }
 .room-status.full { color: #a47c38; background: #f5ecd8; }
 .room-status.live { color: #a94d4d; background: #f5dfdc; }
@@ -100,7 +101,8 @@ input:focus, select:focus { border-color: #4d8f75; box-shadow: 0 0 0 3px rgba(77
 .back-button { border: 0; padding: 0; color: #557168; background: transparent; font-size: 12px; }
 .lobby-content { width: min(1120px, 100%); margin: 0 auto; padding: 72px 5vw; }
 .lobby-header { align-items: start; padding-bottom: 35px; border-bottom: 1px solid #d7e0d8; }
-.lobby-header h1 { font-size: clamp(32px, 5vw, 62px); }
+.lobby-header h1 { font-size: clamp(32px, 5vw, 62px); overflow-wrap: anywhere; }
+.lobby-header > div { min-width: 0; }
 .lobby-board { display: grid; grid-template-columns: 1fr 360px; gap: 28px; margin-top: 28px; }
 .lobby-map { position: relative; min-height: 440px; overflow: hidden; border: 1px solid #6f9985; background: #264d43; color: #d9efdc; }
 .map-lines { position: absolute; inset: 0; opacity: .4; background-image: linear-gradient(35deg, transparent 49%, rgba(181, 222, 188, .35) 50%, transparent 51%), linear-gradient(-18deg, transparent 49%, rgba(181, 222, 188, .28) 50%, transparent 51%), repeating-linear-gradient(90deg, transparent 0 58px, rgba(181, 222, 188, .12) 59px 60px); }

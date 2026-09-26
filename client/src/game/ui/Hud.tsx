@@ -37,8 +37,8 @@ function Roster({ players }: { players: RosterEntry[] }) {
           {players.filter((p) => p.team === team).map((p) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, opacity: p.status === 'offline' ? 0.5 : 1 }}>
               <span>{p.name}{p.you ? ' (you)' : ''}</span>
-              <span style={{ color: p.status === 'dead' ? '#ef6b66' : p.status === 'carrying flag' ? '#ffd98f' : '#9fb4c8' }}>
-                {p.status === 'carrying flag' ? '🚩 flag' : p.status}{p.status !== 'dead' && p.status !== 'offline' ? ` · ${Math.round(p.hp)}hp` : ''}
+              <span style={{ color: p.status === 'dead' ? '#ef6b66' : p.status === 'carrying gem' ? '#ffd98f' : '#9fb4c8' }}>
+                {p.status === 'carrying gem' ? '💎 gem' : p.status}{p.status !== 'dead' && p.status !== 'offline' ? ` · ${Math.round(p.hp)}hp` : ''}
               </span>
             </div>
           ))}
@@ -158,7 +158,7 @@ export function Hud() {
       >
         <div style={{ fontSize: 18, color: '#ffd98f' }}>SCORE {state.score}</div>
         <div style={{ opacity: 0.85 }}>
-          {state.carryingFlag ? `🚩 CARRYING ENEMY FLAG — return to ${(team ?? 'blue').toUpperCase()} base!` : 'Capture the enemy flag'}
+          {state.carryingGem ? `💎 CARRYING ENEMY GEM — bring it to your ${(team ?? 'blue').toUpperCase()} gem!` : 'Steal the enemy gem'}
         </div>
         {state.nearHelicopter && !state.inHelicopter && <div style={{ color: '#8fd0ff' }}>[E] Board helicopter</div>}
       </div>

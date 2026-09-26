@@ -1,7 +1,8 @@
 import * as THREE from 'three'
-import { createTerrain, createWater, createSkyAndLights, heightAt } from './world/terrain'
-import { createBase, animateFlag, type BaseObjects, type Team } from './world/bases'
-import { createForest, createRocks, createBushes, createClouds } from './world/nature'
+import { createTerrain, createWater, createSkyAndLights, heightAt, SHADOW_RANGE, SUN_OFFSET, FOG_FAR } from './world/terrain'
+import { createBase, GEM_LOCAL, turretPlacements, BASE_HALF, type BaseObjects, type Team } from './world/bases'
+import { createForest, createRocks, createBushes, createClouds, createGrass, type GrassField, type RockField } from './world/nature'
+import { createTurrets, type TurretField } from './world/turrets'
 import { createHelicopter, HELI_SEAT_OFFSET, type Helicopter } from './world/helicopter'
 import { Player, EYE_HEIGHT } from './world/player'
 import { Viewmodel } from './world/viewmodel'
@@ -21,12 +22,20 @@ interface RemotePlayer {
   avatar: Avatar | null
   target: NetState | null
   snapped: boolean
+  /** Died while flying: the body is inside the falling helicopter, so no death animation on the ground. */
+  diedFlying: boolean
   /** Smoothed ground speed of the rendered avatar, drives idle/run blending. */
   speed: number
 }
 
 const NET_SEND_INTERVAL = 1 / 15
 const ROSTER_INTERVAL = 0.3
+/** Other players' solid radius; with the player's own 0.6 radius, bodies keep ~1m apart. */
+const PLAYER_BLOCK_RADIUS = 0.45
+const PLAYER_BLOCK_HEIGHT = 1.8
+const HELI_BLOCK_RADIUS = 3.8
+/** A helicopter higher than this above the ground is flying and doesn't block walking under it. */
+const HELI_GROUND_CLEARANCE = 3
 /** Jumps further than this (respawn, leaving a helicopter) snap instead of gliding across the map. */
 const SNAP_DISTANCE = 25
 const TEAM_NAME: Record<Team, string> = { blue: 'BLUE', red: 'RED' }
@@ -52,6 +61,8 @@ export class BattlefieldGame {
   /** Last pose a remote pilot reported, so a landed helicopter rests exactly where they left it. */
   private heliLastPose: Record<Team, NonNullable<NetState['heli']> | null> = { blue: null, red: null }
   private dead = false
+  private sun!: THREE.DirectionalLight
+  private deathCamRoll = 0
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
@@ -61,7 +72,10 @@ export class BattlefieldGame {
   private heli: Helicopter
   private ourBase: BaseObjects
   private enemyBase: BaseObjects
-  private flags: { blue: BaseObjects; red: BaseObjects }
+  private bases: { blue: BaseObjects; red: BaseObjects }
+  private turrets: TurretField
+  private grass: GrassField
+  private rocks: RockField
   private input = {
     forward: false,
     back: false,
@@ -90,11 +104,13 @@ export class BattlefieldGame {
     this.team = match.players.find((p) => p.id === match.you)?.team ?? 'blue'
 
     // Renderer
-    this.renderer = new THREE.WebGLRenderer({ antialias: true })
+    // Ask Chrome for the discrete GPU on laptops/desktops that have one
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
     this.renderer.setSize(container.clientWidth, container.clientHeight)
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    // 1.5x keeps high-DPI monitors sharp without rendering 4x the pixels
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
     this.renderer.shadowMap.enabled = true
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     container.appendChild(this.renderer.domElement)
 
@@ -104,37 +120,52 @@ export class BattlefieldGame {
       75,
       container.clientWidth / container.clientHeight,
       0.1,
-      2200,
+      FOG_FAR, // past the fog end everything is sky coloured anyway
     )
     this.camera.rotation.order = 'YXZ'
     this.scene.add(this.camera)
 
     // World
-    createSkyAndLights(this.scene)
+    this.sun = createSkyAndLights(this.scene)
     const terrain = createTerrain()
     const worldCircles: Array<{ x: number; z: number; r: number }> = []
     this.scene.add(terrain)
     this.scene.add(createWater())
     const forest = createForest(worldCircles)
-    const rocks = createRocks(worldCircles)
+    this.rocks = createRocks(worldCircles)
     this.scene.add(forest)
-    this.scene.add(rocks)
+    this.scene.add(this.rocks.group)
     this.scene.add(createBushes(worldCircles))
     this.scene.add(createClouds())
 
     // Bases: blue in the south-west corner, red in the north-east; "ours" depends on the team
     const blueBase = createBase('blue', new THREE.Vector3(-380, 0, -380))
     const redBase = createBase('red', new THREE.Vector3(380, 0, 380))
-    this.flags = { blue: blueBase, red: redBase }
-    this.ourBase = this.flags[this.team]
-    this.enemyBase = this.flags[other(this.team)]
+    this.bases = { blue: blueBase, red: redBase }
+    this.ourBase = this.bases[this.team]
+    this.enemyBase = this.bases[other(this.team)]
     this.scene.add(blueBase.group)
     this.scene.add(redBase.group)
+
+    // Machine-gun emplacements around both bases (solid: they block players and bullets)
+    this.turrets = createTurrets((['blue', 'red'] as const).map((team) => ({
+      center: this.bases[team].group.position,
+      placements: turretPlacements(team, this.bases[team].group.position),
+    })))
+    this.scene.add(this.turrets.group)
+    worldCircles.push(...this.turrets.circles)
+
+    // Grass everywhere except inside the bases and under the guns
+    const baseCenters = [blueBase.group.position, redBase.group.position]
+    this.grass = createGrass((x, z) =>
+      baseCenters.some((c) => Math.abs(x - c.x) < BASE_HALF + 6 && Math.abs(z - c.z) < BASE_HALF + 6) ||
+      this.turrets.turrets.some((t) => Math.hypot(x - t.x, z - t.z) < 4))
+    this.scene.add(this.grass.group)
 
     // Each team's helicopter parked on its own base pad, nose toward the enemy base
     const heliYaw = (team: Team) => (team === 'blue' ? Math.PI * 0.25 : Math.PI * 1.25)
     const makeHeli = (team: Team) => {
-      const base = this.flags[team].group.position
+      const base = this.bases[team].group.position
       const pad = new THREE.Vector3(base.x + 20, 0, base.z - 18)
       pad.y = heightAt(pad.x, pad.z) + 0.05
       const heli = createHelicopter(pad, team === this.team
@@ -166,9 +197,9 @@ export class BattlefieldGame {
     this.viewmodel.loadHandgun()
     this.viewmodel.show('primary-handgun')
 
-    // Everything that stops a bullet: terrain, bases, trees, rocks, helicopters (player avatars are added per shot).
-    // Bushes are left out on purpose: they hide you but don't stop bullets.
-    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, forest, rocks, this.helis.blue.object, this.helis.red.object]
+    // Everything that stops a bullet: terrain, bases, trees, rocks, helicopters, machine guns (player avatars are
+    // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
+    this.targetList = [terrain, this.ourBase.group, this.enemyBase.group, forest, this.rocks.group, this.helis.blue.object, this.helis.red.object, this.turrets.group]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
@@ -178,7 +209,7 @@ export class BattlefieldGame {
     const enemy = TEAM_NAME[other(this.team)]
     setGameState({
       team: this.team,
-      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} flag and bring it to your ${TEAM_NAME[this.team]} flagpole. [E] to interact.`,
+      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} gem and bring it to your ${TEAM_NAME[this.team]} gem. [E] to interact.`,
     })
     this.publishRoster()
 
@@ -189,7 +220,7 @@ export class BattlefieldGame {
     if (player.id === this.match.you) return
     let remote = this.remotes.get(player.id)
     if (!remote) {
-      remote = { info: player, avatar: null, target: null, snapped: false, speed: 0 }
+      remote = { info: player, avatar: null, target: null, snapped: false, speed: 0, diedFlying: false }
       this.remotes.set(player.id, remote)
     }
     if (remote.avatar && remote.info.team !== player.team) {
@@ -257,6 +288,8 @@ export class BattlefieldGame {
     if (!remote) return
     remote.info.dead = true
     remote.info.hp = 0
+    remote.diedFlying = !!remote.target?.heli
+    remote.avatar?.die()
     this.releaseHeliFrom(id)
     if (by === this.match.you) setGameState({ message: `You eliminated ${remote.info.displayName}.` })
     this.publishRoster()
@@ -275,6 +308,8 @@ export class BattlefieldGame {
     remote.info.dead = false
     remote.info.hp = 100
     remote.snapped = false
+    remote.diedFlying = false
+    remote.avatar?.revive()
     this.publishRoster()
   }
 
@@ -317,11 +352,14 @@ export class BattlefieldGame {
 
   private die(killer: string | null) {
     this.dead = true
+    this.deathCamRoll = 0
     if (this.inHeli) {
       this.inHeli = false
       this.heli.setParked(true)
       setGameState({ inHelicopter: false })
     }
+    // Put the body on the ground (it may have been in a helicopter seat) so others see it fall there
+    this.player.position.y = heightAt(this.player.position.x, this.player.position.z) + EYE_HEIGHT
     this.carryTarget = null
     this.captureSent = false
     this.mouse.shooting = false
@@ -329,10 +367,29 @@ export class BattlefieldGame {
     setGameState({
       dead: true,
       health: 0,
-      carryingFlag: false,
+      carryingGem: false,
       message: `${killer ? `You were eliminated by ${killer}` : 'You were eliminated'}. Respawning in 5 seconds…`,
     })
     this.publishRoster()
+  }
+
+  /** First-person death: the view sinks to the ground and tips over. */
+  private updateDeathCamera(dt: number) {
+    const k = 1 - Math.exp(-dt * 5)
+    const ground = heightAt(this.camera.position.x, this.camera.position.z) + 0.35
+    this.camera.position.y = THREE.MathUtils.lerp(this.camera.position.y, ground, k)
+    this.deathCamRoll = THREE.MathUtils.lerp(this.deathCamRoll, 0.9, k)
+    this.camera.rotation.set(THREE.MathUtils.lerp(this.camera.rotation.x, 0.25, k), this.player.yaw, this.deathCamRoll)
+  }
+
+  /** The sun's shadow box follows the camera (snapped to whole shadow texels so edges don't shimmer). */
+  private updateShadowArea() {
+    const texel = (SHADOW_RANGE * 2) / this.sun.shadow.mapSize.x
+    const x = Math.round(this.camera.position.x / texel) * texel
+    const z = Math.round(this.camera.position.z / texel) * texel
+    this.sun.target.position.set(x, 0, z)
+    this.sun.position.set(x + SUN_OFFSET.x, SUN_OFFSET.y, z + SUN_OFFSET.z)
+    this.sun.target.updateMatrixWorld()
   }
 
   private releaseHeliFrom(pilotId: string) {
@@ -367,9 +424,29 @@ export class BattlefieldGame {
     }
   }
 
+  /** Other players on foot and helicopters sitting on the ground are solid: you can't walk through them. */
+  private movingObstacles() {
+    const obstacles: Array<{ x: number; z: number; r: number }> = []
+    const feetY = this.player.position.y - EYE_HEIGHT
+    for (const remote of this.remotes.values()) {
+      const avatar = remote.avatar?.group
+      if (!avatar?.visible || remote.info.dead) continue
+      // Only when roughly level with us, so someone on a ledge above or below doesn't block
+      if (Math.abs(avatar.position.y - feetY) > PLAYER_BLOCK_HEIGHT) continue
+      obstacles.push({ x: avatar.position.x, z: avatar.position.z, r: PLAYER_BLOCK_RADIUS })
+    }
+    for (const team of ['blue', 'red'] as const) {
+      const heli = this.helis[team].object
+      if (team === this.team && this.inHeli) continue
+      if (heli.position.y - heightAt(heli.position.x, heli.position.z) > HELI_GROUND_CLEARANCE) continue
+      obstacles.push({ x: heli.position.x, z: heli.position.z, r: HELI_BLOCK_RADIUS })
+    }
+    return obstacles
+  }
+
   private shootTargets() {
     const avatars: THREE.Object3D[] = []
-    for (const remote of this.remotes.values()) if (remote.avatar?.group.visible) avatars.push(remote.avatar.group)
+    for (const remote of this.remotes.values()) if (remote.avatar?.group.visible && !remote.info.dead) avatars.push(remote.avatar.group)
     // From the cockpit, don't let shots hit the helicopter we're sitting in
     const targets = this.inHeli ? this.targetList.filter((t) => t !== this.heli.object) : this.targetList
     return [...targets, ...avatars]
@@ -384,11 +461,11 @@ export class BattlefieldGame {
     setGameState({
       finished: true,
       winner,
-      carryingFlag: false,
+      carryingGem: false,
       score: this.score,
       message: won
-        ? `VICTORY! The ${TEAM_NAME[winner]} team captured the enemy flag.`
-        : `DEFEAT. The ${TEAM_NAME[winner]} team captured your flag.`,
+        ? `VICTORY! The ${TEAM_NAME[winner]} team stole the enemy gem.`
+        : `DEFEAT. The ${TEAM_NAME[winner]} team stole your gem.`,
     })
     document.exitPointerLock?.()
   }
@@ -414,6 +491,15 @@ export class BattlefieldGame {
       const s = remote.target
       if (!remote.info.online || !s || !remote.avatar) continue
       const avatar = remote.avatar.group
+      const distance = avatar.position.distanceTo(this.camera.position)
+      if (remote.info.dead) {
+        // The body stays where it fell while the death animation plays
+        avatar.visible = !remote.diedFlying && remote.avatar.deathVisible()
+        remote.avatar.carriedGem.visible = false
+        if (avatar.visible) remote.avatar.update(dt, 0, 0, distance)
+        if (remote.info.team && this.heliPilot[remote.info.team] === remote.info.id) this.releaseHeliFrom(remote.info.id)
+        continue
+      }
       const feet = new THREE.Vector3(s.p[0], s.p[1] - EYE_HEIGHT, s.p[2])
       let groundSpeed = 0
       if (!remote.snapped || avatar.position.distanceToSquared(feet) > SNAP_DISTANCE ** 2) {
@@ -428,10 +514,10 @@ export class BattlefieldGame {
         groundSpeed = Math.hypot(avatar.position.x - beforeX, avatar.position.z - beforeZ) / Math.max(dt, 1e-3)
       }
       remote.speed = THREE.MathUtils.lerp(remote.speed, groundSpeed, 1 - Math.exp(-dt * 6))
-      const flying = !!s.heli && !remote.info.dead
-      avatar.visible = !flying && !remote.info.dead
-      remote.avatar.carriedFlag.visible = s.flag && !remote.info.dead
-      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch)
+      const flying = !!s.heli
+      avatar.visible = !flying
+      remote.avatar.carriedGem.visible = s.flag
+      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance)
 
       // A remote pilot drives their team's shared helicopter; we never override our own while flying it
       const team = remote.info.team
@@ -459,23 +545,17 @@ export class BattlefieldGame {
     this.helis[other(this.team)].update(dt, time)
   }
 
-  /** A flag is "taken" while anyone — us or a remote player — carries it. */
-  private flagCarried(flagTeam: Team) {
-    if (this.carryTarget === flagTeam) return true
+  /** A gem is "taken" while anyone — us or a remote player — carries it (`flag` on the wire = carrying the enemy gem). */
+  private gemCarried(gemTeam: Team) {
+    if (this.carryTarget === gemTeam) return true
     for (const remote of this.remotes.values()) {
-      if (remote.info.online && !remote.info.dead && remote.target?.flag && remote.info.team === other(flagTeam)) return true
+      if (remote.info.online && !remote.info.dead && remote.target?.flag && remote.info.team === other(gemTeam)) return true
     }
     return false
   }
 
-  private updateFlagVisibility() {
-    for (const team of ['blue', 'red'] as const) {
-      const base = this.flags[team]
-      const carried = this.flagCarried(team)
-      base.flagState.carried = carried
-      base.flagCloth.visible = !carried
-      base.flagTip.visible = !carried
-    }
+  private updateGemVisibility() {
+    for (const team of ['blue', 'red'] as const) this.bases[team].gem.setTaken(this.gemCarried(team))
   }
 
   private publishRoster() {
@@ -484,7 +564,7 @@ export class BattlefieldGame {
       id: this.match.you,
       name: me?.displayName ?? 'You',
       team: this.team,
-      status: this.dead ? 'dead' : this.carryTarget ? 'carrying flag' : this.inHeli ? 'flying' : 'on foot',
+      status: this.dead ? 'dead' : this.carryTarget ? 'carrying gem' : this.inHeli ? 'flying' : 'on foot',
       hp: gameState.health,
       you: true,
     }]
@@ -494,7 +574,7 @@ export class BattlefieldGame {
         id: remote.info.id,
         name: remote.info.displayName,
         team: remote.info.team,
-        status: !remote.info.online ? 'offline' : remote.info.dead ? 'dead' : s?.flag ? 'carrying flag' : s?.heli ? 'flying' : 'on foot',
+        status: !remote.info.online ? 'offline' : remote.info.dead ? 'dead' : s?.flag ? 'carrying gem' : s?.heli ? 'flying' : 'on foot',
         hp: remote.info.hp ?? 100,
         you: false,
       })
@@ -755,30 +835,22 @@ export class BattlefieldGame {
   private heliRoll = 0
   private heliPitch = 0
 
-  private updateFlagsAndCapture() {
-    // Flag waving needs world position
-    const ourFlagPos = this.ourBase.group.position
-    const enemyFlagPos = this.enemyBase.group.position
-    animateFlag(this.ourBase, this.clock.elapsedTime, ourFlagPos)
-    animateFlag(this.enemyBase, this.clock.elapsedTime, enemyFlagPos)
-
+  private updateGemsAndCapture() {
     // Carry logic — only when on foot
     if (this.inHeli || this.carryTarget) {
-      // While carrying, the pole cloth stays hidden; HUD shows carrier state
       this.updateNearHeliState()
       return
     }
 
-    // Pickup: proximity to the enemy flagpole base (reachable on foot), unless a teammate already has it
+    // Pickup: close to the enemy gem's pedestal (reachable on foot), unless a teammate already has it
     const enemyTeam = other(this.team)
-    const flagLocal = new THREE.Vector3(-12, 0, 0)
-    const enemyFlagWorld = this.enemyBase.group.localToWorld(flagLocal.clone())
-    const d = this.player.position.distanceTo(enemyFlagWorld)
-    if (d < 7 && !this.dead && !this.flagCarried(enemyTeam)) {
+    const enemyGemWorld = this.enemyBase.group.localToWorld(GEM_LOCAL.clone())
+    const d = this.player.position.distanceTo(enemyGemWorld)
+    if (d < 7 && !this.dead && !this.gemCarried(enemyTeam)) {
       this.carryTarget = enemyTeam
       setGameState({
-        carryingFlag: true,
-        message: `${TEAM_NAME[enemyTeam]} flag taken! Bring it to the ${TEAM_NAME[this.team]} flagpole.`,
+        carryingGem: true,
+        message: `${TEAM_NAME[enemyTeam]} gem taken! Bring it to the ${TEAM_NAME[this.team]} gem.`,
       })
     }
 
@@ -792,8 +864,8 @@ export class BattlefieldGame {
 
   private tryCapture() {
     if (!this.carryTarget) return
-    const ourFlagWorld = this.ourBase.group.localToWorld(new THREE.Vector3(-12, 0, 0))
-    const d = this.player.position.distanceTo(ourFlagWorld)
+    const ourGemWorld = this.ourBase.group.localToWorld(GEM_LOCAL.clone())
+    const d = this.player.position.distanceTo(ourGemWorld)
     if (d >= 9) {
       this.captureSent = false
       return
@@ -803,17 +875,13 @@ export class BattlefieldGame {
     this.captureSent = true
     this.sendNetState()
     this.match.net.sendCapture()
-    setGameState({ message: 'Flag delivered — confirming capture…' })
+    setGameState({ message: 'Gem delivered — confirming capture…' })
   }
 
   private score = 0
 
   private updatePlayer(dt: number) {
-    this.player.setExtraCircle(
-      this.heli.object.position.x,
-      this.heli.object.position.z,
-      this.inHeli ? 0 : 3.8,
-    )
+    this.player.setDynamicCircles(this.movingObstacles())
     if (this.inHeli || this.dead) {
       setGameState({ nearHelicopter: false })
       return
@@ -828,7 +896,7 @@ export class BattlefieldGame {
       ammo: this.weapon.ammo,
       maxAmmo: this.weapon.def.magSize,
       reloading: this.weapon.reloading,
-      carryingFlag: this.carryTarget !== null,
+      carryingGem: this.carryTarget !== null,
     })
   }
 
@@ -844,7 +912,13 @@ export class BattlefieldGame {
       const time = this.clock.elapsedTime
 
       this.updateRemotes(realDt, time)
-      this.updateFlagVisibility()
+      this.updateShadowArea()
+      this.bases.blue.gem.update(time)
+      this.bases.red.gem.update(time)
+      this.turrets.update(time, this.camera.position)
+      this.grass.update(this.camera.position)
+      this.rocks.update(this.camera.position)
+      this.updateGemVisibility()
       // Real time, not the capped frame dt, so slow machines don't fall behind
       const now = performance.now()
       if (now - this.lastRosterAt >= ROSTER_INTERVAL * 1000) {
@@ -859,8 +933,9 @@ export class BattlefieldGame {
       }
 
       this.updatePlayer(dt)
+      if (this.dead) this.updateDeathCamera(realDt)
       this.updateHelicopter(dt, time)
-      this.updateFlagsAndCapture()
+      this.updateGemsAndCapture()
 
       if (now - this.lastNetSend >= NET_SEND_INTERVAL * 1000) {
         this.lastNetSend = now

@@ -5,6 +5,10 @@ import { PublicUser } from './auth.service'
 
 export type Team = 'red' | 'blue'
 
+export const MAX_ROOM_NAME = 32
+const MIN_PLAYERS = 2
+const MAX_PLAYERS = 32
+
 const str = (value: unknown) => (typeof value === 'string' ? value : '')
 
 function shuffle<T>(items: T[]): T[] {
@@ -38,8 +42,10 @@ export class RoomService {
   async create(input: Record<string, unknown>, user: PublicUser) {
     const name = str(input.name).trim()
     const maxMembers = Number(input.maxMembers)
-    if (!name || !Number.isInteger(maxMembers) || maxMembers < 1 || maxMembers > 64) {
-      throw new BadRequestException('Room name and attendance limit from 1 to 64 are required')
+    if (!name || name.length > MAX_ROOM_NAME) throw new BadRequestException(`Room name is required (up to ${MAX_ROOM_NAME} characters)`)
+    // Red vs Blue: an even number of players so both teams are the same size
+    if (!Number.isInteger(maxMembers) || maxMembers < MIN_PLAYERS || maxMembers > MAX_PLAYERS || maxMembers % 2 !== 0) {
+      throw new BadRequestException(`Choose an even number of players from ${MIN_PLAYERS} to ${MAX_PLAYERS} so both teams are equal`)
     }
     if (input.battleType !== 'flag steal') throw new BadRequestException('Only flag steal is available right now')
 

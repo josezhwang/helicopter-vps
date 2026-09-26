@@ -1,6 +1,6 @@
 import type { Team } from './world/bases'
 
-export type PlayerStatus = 'on foot' | 'flying' | 'carrying flag' | 'dead' | 'offline'
+export type PlayerStatus = 'on foot' | 'flying' | 'carrying gem' | 'dead' | 'offline'
 
 export interface RosterEntry {
   id: string
@@ -18,7 +18,7 @@ export interface GameState {
   inHelicopter: boolean
   nearHelicopter: boolean
   nearPickupLabel: string
-  carryingFlag: boolean
+  carryingGem: boolean
   score: number
   message: string
   /** Rotor RPM while piloting (0–1000, viewer-style x10 readout). */
@@ -27,7 +27,7 @@ export interface GameState {
   health: number
   weaponName: string
   weaponPower: number
-  /** True once a flag is captured by either team: result screen shows. */
+  /** True once either team steals the other's gem: result screen shows. */
   finished: boolean
   team: Team | null
   players: RosterEntry[]
@@ -48,7 +48,7 @@ const INITIAL_STATE: GameState = {
   inHelicopter: false,
   nearHelicopter: false,
   nearPickupLabel: '',
-  carryingFlag: false,
+  carryingGem: false,
   score: 0,
   rotorRpm: 0,
   health: 100,

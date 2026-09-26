@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js'
 import type { Team } from './bases'
+import { createCarriedGem } from './gem'
 
 export const TEAM_COLOR: Record<Team, number> = { blue: 0x2e6fbd, red: 0xb03a2e }
 
@@ -14,12 +15,26 @@ const GUN_URL = '/primary-handgun.glb'
 /** Held pistol, a bit oversized so it reads clearly at a distance. */
 const GUN_LENGTH = 0.55
 const FLASH_MS = 70
+/** Robots further than this skip shadows and animate at a third of the rate (hard to notice at that range). */
+const DETAIL_DISTANCE = 70
+const FAR_ANIMATION_DISTANCE = 120
+// Death: stumble (the model's stagger reaction), topple backwards, lie still, then sink away before respawn
+const DEATH_STUMBLE = 0.45
+const DEATH_FALL = 0.55
+const DEATH_LIE = 2.2
+const DEATH_SINK = 0.8
 
 export interface Avatar {
   group: THREE.Group
-  carriedFlag: THREE.Object3D
-  /** Advance animation; `speed` is ground speed in world units/s, `pitch` the player's aim pitch. */
-  update: (dt: number, speed: number, pitch: number) => void
+  /** The enemy gem, shown spinning above the head while this player carries it. */
+  carriedGem: THREE.Object3D
+  /** Advance animation; `speed` is ground speed (units/s), `pitch` the aim pitch, `distance` from the camera. */
+  update: (dt: number, speed: number, pitch: number, distance: number) => void
+  /** Play the death: stumble, fall backwards, lie, sink. */
+  die: () => void
+  revive: () => void
+  /** True while the death animation should still be shown (it hides itself once sunk). */
+  deathVisible: () => boolean
   /** Show the muzzle flash and return the muzzle's world position for the tracer. */
   fire: () => THREE.Vector3
   dispose: () => void
@@ -84,6 +99,7 @@ interface RobotAsset {
   scene: THREE.Object3D
   idle: THREE.AnimationClip
   run: THREE.AnimationClip
+  stagger: THREE.AnimationClip | null
   scale: number
   lift: number
 }
@@ -96,6 +112,8 @@ function loadRobot(): Promise<RobotAsset | null> {
     const idle = gltf.animations.find((clip) => clip.name.endsWith('idle01'))
     const run = gltf.animations.find((clip) => clip.name.endsWith('dash'))
     if (!idle || !run) throw new Error('robot model is missing its idle01/dash animations')
+    // The model has no death clip; its stagger reaction starts the death, then the body is toppled in code
+    const stagger = gltf.animations.find((clip) => clip.name.endsWith('emo_stagger')) ?? null
     // The clips rescale the bones, so measure the robot as it actually renders: posed by its idle clip
     const probe = new THREE.AnimationMixer(gltf.scene)
     probe.clipAction(idle).play()
@@ -105,7 +123,7 @@ function loadRobot(): Promise<RobotAsset | null> {
     probe.stopAllAction()
     probe.uncacheRoot(gltf.scene)
     const scale = ROBOT_HEIGHT / (box.max.y - box.min.y)
-    return { scene: gltf.scene, idle, run, scale, lift: -box.min.y * scale }
+    return { scene: gltf.scene, idle, run, stagger, scale, lift: -box.min.y * scale }
   }).catch((error) => {
     console.error('[avatar] robot model failed to load, keeping simple soldiers:', error)
     return null
@@ -155,25 +173,28 @@ const noRaycast = () => {}
 export function createAvatar(name: string, team: Team): Avatar {
   const group = new THREE.Group()
   const own: Array<THREE.Mesh | THREE.Sprite> = []
+  // Pivot at the feet holding everything that topples over when the player dies
+  const body = new THREE.Group()
+  group.add(body)
 
   // Simple soldier shown until the robot model has loaded (or if it fails to load)
   const fallback = new THREE.Group()
   const teamMat = new THREE.MeshStandardMaterial({ color: TEAM_COLOR[team], roughness: 0.7 })
   const gearMat = new THREE.MeshStandardMaterial({ color: 0x2f3a2c, roughness: 0.9 })
   const skinMat = new THREE.MeshStandardMaterial({ color: 0xd9a77e, roughness: 0.8 })
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.8, 4, 12), teamMat)
-  body.position.y = 1.0
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.8, 4, 12), teamMat)
+  torso.position.y = 1.0
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 12), skinMat)
   head.position.y = 1.78
   const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), gearMat)
   helmet.position.y = 1.82
-  for (const mesh of [body, head, helmet]) {
+  for (const mesh of [torso, head, helmet]) {
     mesh.castShadow = true
     mesh.raycast = noRaycast
     fallback.add(mesh)
     own.push(mesh)
   }
-  group.add(fallback)
+  body.add(fallback)
 
   // Invisible capsule used for bullet hits, so hit detection doesn't depend on the animated mesh
   const hitbox = new THREE.Mesh(new THREE.CapsuleGeometry(0.5, 1.0, 2, 8), new THREE.MeshBasicMaterial({ visible: false }))
@@ -181,27 +202,16 @@ export function createAvatar(name: string, team: Team): Avatar {
   group.add(hitbox)
   own.push(hitbox)
 
-  const carriedFlag = new THREE.Group()
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.8, 6), new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.8 }))
-  pole.position.y = 0.9
-  const cloth = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.9, 0.55),
-    new THREE.MeshStandardMaterial({ color: TEAM_COLOR[team === 'blue' ? 'red' : 'blue'], side: THREE.DoubleSide }),
-  )
-  cloth.position.set(0.45, 1.5, 0)
-  for (const mesh of [pole, cloth]) {
-    mesh.raycast = noRaycast
-    own.push(mesh)
-  }
-  carriedFlag.add(pole, cloth)
-  carriedFlag.position.set(-0.2, 1.1, 0.35)
-  carriedFlag.visible = false
-  group.add(carriedFlag)
+  // Shared gem model/materials: not in `own`, so disposing an avatar leaves them for everyone else
+  const carriedGem = createCarriedGem(team === 'blue' ? 'red' : 'blue')
+  carriedGem.position.set(0, 2.05, 0.15)
+  carriedGem.visible = false
+  body.add(carriedGem)
 
   // Held handgun: follows the robot's right hand, points where the player aims
   const gunHolder = new THREE.Group()
   gunHolder.position.set(0.32, 1.25, -0.3)
-  group.add(gunHolder)
+  body.add(gunHolder)
   const muzzle = new THREE.Object3D()
   muzzle.position.set(0, 0.05, -GUN_LENGTH / 2)
   gunHolder.add(muzzle)
@@ -218,7 +228,7 @@ export function createAvatar(name: string, team: Team): Avatar {
   })
 
   const label = nameLabel(name, team)
-  label.position.y = 2.55
+  label.position.y = 2.75
   // Bullets pass through name tags (sprite raycasts also need a camera on the raycaster)
   label.raycast = noRaycast
   group.add(label)
@@ -232,6 +242,14 @@ export function createAvatar(name: string, team: Team): Avatar {
   let runWeight = 0
   let rightHand: THREE.Object3D | null = null
   const handPos = new THREE.Vector3()
+  let staggerAction: THREE.AnimationAction | null = null
+  const robotMeshes: THREE.Mesh[] = []
+  let detailed = true
+  let farSkip = 0
+  let farDt = 0
+  /** Seconds since death, or -1 while alive (from the real clock, so slow frames can't stretch it). */
+  let deathTime = -1
+  let deathStart = 0
 
   void loadRobot().then((asset) => {
     if (!asset || disposed) return
@@ -239,43 +257,107 @@ export function createAvatar(name: string, team: Team): Avatar {
     model.traverse((node) => {
       const mesh = node as THREE.Mesh
       if (!mesh.isMesh) return
-      mesh.castShadow = true
+      mesh.castShadow = detailed
       mesh.raycast = noRaycast
       mesh.material = Array.isArray(mesh.material) ? mesh.material.map((m) => teamMaterial(m, team)) : teamMaterial(mesh.material, team)
+      robotMeshes.push(mesh)
     })
     const holder = new THREE.Group()
     holder.scale.setScalar(asset.scale)
     holder.position.y = asset.lift
     holder.rotation.y = Math.PI // model faces +Z; avatars face -Z
     holder.add(model)
-    group.add(holder)
+    body.add(holder)
     fallback.visible = false
 
     mixer = new THREE.AnimationMixer(model)
     idle = mixer.clipAction(asset.idle).play()
     run = mixer.clipAction(asset.run).play()
     run.setEffectiveWeight(0)
+    if (asset.stagger) {
+      staggerAction = mixer.clipAction(asset.stagger)
+      staggerAction.setLoop(THREE.LoopOnce, 1)
+      staggerAction.clampWhenFinished = true
+    }
     model.traverse((node) => { if (/^Bip001.R.Hand/.test(node.name)) rightHand = node })
+    if (deathTime >= 0) startDeathClip()
   })
+
+  function startDeathClip() {
+    if (!staggerAction || !idle || !run) return
+    idle.setEffectiveWeight(0)
+    run.setEffectiveWeight(0)
+    staggerAction.reset().setEffectiveWeight(1).setEffectiveTimeScale(1.4).play()
+  }
+
+  const ease = (t: number) => 1 - (1 - t) ** 3
+  function updateDeath(dt: number) {
+    deathTime = (performance.now() - deathStart) / 1000
+    const fall = THREE.MathUtils.clamp((deathTime - DEATH_STUMBLE) / DEATH_FALL, 0, 1)
+    // Facing -Z, a positive X rotation tips the head towards +Z: falling onto the back
+    body.rotation.x = ease(fall) * (Math.PI / 2 - 0.08)
+    const sink = THREE.MathUtils.clamp((deathTime - DEATH_STUMBLE - DEATH_FALL - DEATH_LIE) / DEATH_SINK, 0, 1)
+    body.position.y = 0.15 * ease(fall) - sink * 0.9
+    // Once down, the pose is frozen: no more skinning work for a corpse
+    if (mixer && fall < 1) mixer.update(dt)
+  }
 
   return {
     group,
-    carriedFlag,
-    update(dt, speed, pitch) {
+    carriedGem,
+    update(dt, speed, pitch, distance) {
       if (flash.visible && performance.now() > flashUntil) flash.visible = false
-      gunHolder.rotation.set(pitch, 0, 0)
-      if (!mixer || !idle || !run) return
-      const moving = speed > MOVING_SPEED
-      runWeight = THREE.MathUtils.lerp(runWeight, moving ? 1 : 0, 1 - Math.exp(-dt * 8))
-      idle.setEffectiveWeight(1 - runWeight)
-      run.setEffectiveWeight(runWeight)
-      run.timeScale = THREE.MathUtils.clamp(speed / RUN_CYCLE_SPEED, 0.6, 1.4)
-      mixer.update(dt)
+      if (carriedGem.visible) carriedGem.rotation.y += dt * 2.5
+      const near = distance < DETAIL_DISTANCE
+      if (near !== detailed) {
+        detailed = near
+        for (const mesh of robotMeshes) mesh.castShadow = near
+      }
+      if (deathTime >= 0) {
+        updateDeath(dt)
+      } else {
+        gunHolder.rotation.set(pitch, 0, 0)
+        if (!mixer || !idle || !run) return
+        // Far away, advance the skeleton every third frame (same total time, a third of the CPU)
+        farDt += dt
+        if (distance > FAR_ANIMATION_DISTANCE && ++farSkip % 3 !== 0) return
+        const step = farDt
+        farDt = 0
+        const moving = speed > MOVING_SPEED
+        runWeight = THREE.MathUtils.lerp(runWeight, moving ? 1 : 0, 1 - Math.exp(-step * 8))
+        idle.setEffectiveWeight(1 - runWeight)
+        run.setEffectiveWeight(runWeight)
+        run.timeScale = THREE.MathUtils.clamp(speed / RUN_CYCLE_SPEED, 0.6, 1.4)
+        mixer.update(step)
+      }
       if (rightHand) {
         group.updateMatrixWorld(true)
         rightHand.getWorldPosition(handPos)
-        gunHolder.position.copy(group.worldToLocal(handPos))
+        gunHolder.position.copy(body.worldToLocal(handPos))
       }
+    },
+    die() {
+      if (deathTime >= 0) return
+      deathTime = 0
+      deathStart = performance.now()
+      carriedGem.visible = false
+      label.visible = false
+      flash.visible = false
+      startDeathClip()
+    },
+    revive() {
+      deathTime = -1
+      body.rotation.x = 0
+      body.position.y = 0
+      label.visible = true
+      staggerAction?.stop()
+      runWeight = 0
+      idle?.setEffectiveWeight(1)
+      run?.setEffectiveWeight(0)
+    },
+    deathVisible() {
+      if (deathTime < 0) return false
+      return (performance.now() - deathStart) / 1000 < DEATH_STUMBLE + DEATH_FALL + DEATH_LIE + DEATH_SINK
     },
     fire() {
       flash.visible = true

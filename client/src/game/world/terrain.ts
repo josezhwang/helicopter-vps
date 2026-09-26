@@ -77,9 +77,15 @@ export function createWater(): THREE.Mesh {
   return mesh
 }
 
+export const SHADOW_RANGE = 160
+/** Direction from the ground towards the sun (the original fixed sun position). */
+export const SUN_OFFSET = new THREE.Vector3(-260, 320, 160)
+/** Beyond this the fog is solid sky colour, so nothing further needs drawing. */
+export const FOG_FAR = 1500
+
 export function createSkyAndLights(scene: THREE.Scene): THREE.DirectionalLight {
   scene.background = new THREE.Color(0x9db8d9)
-  scene.fog = new THREE.Fog(0x9db8d9, 300, 1500)
+  scene.fog = new THREE.Fog(0x9db8d9, 300, FOG_FAR)
 
   const hemi = new THREE.HemisphereLight(0xbcd7ff, 0x4a5a33, 0.85)
   scene.add(hemi)
@@ -87,14 +93,18 @@ export function createSkyAndLights(scene: THREE.Scene): THREE.DirectionalLight {
   const sun = new THREE.DirectionalLight(0xfff2d8, 2.2)
   sun.position.set(-260, 320, 160)
   sun.castShadow = true
+  // Shadows cover the area around the player (the game moves this box with the camera):
+  // far fewer objects to render into the shadow map, and sharper shadows than one map for the whole world
   sun.shadow.mapSize.set(2048, 2048)
   sun.shadow.camera.near = 50
   sun.shadow.camera.far = 900
-  sun.shadow.camera.left = -520
-  sun.shadow.camera.right = 520
-  sun.shadow.camera.top = 520
-  sun.shadow.camera.bottom = -520
+  sun.shadow.camera.left = -SHADOW_RANGE
+  sun.shadow.camera.right = SHADOW_RANGE
+  sun.shadow.camera.top = SHADOW_RANGE
+  sun.shadow.camera.bottom = -SHADOW_RANGE
+  sun.shadow.bias = -0.0005
   scene.add(sun)
+  scene.add(sun.target)
 
   return sun
 }

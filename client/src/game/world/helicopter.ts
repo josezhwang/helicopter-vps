@@ -1,9 +1,46 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { heightAt } from './terrain'
 
 /** Seat offset where the player camera sits while piloting. */
 export const HELI_SEAT_OFFSET = new THREE.Vector3(0.0, 1.25, 0.4)
+
+/** Beyond this distance the 35k-triangle version is drawn instead of the 236k-triangle model. */
+const LOD_DISTANCE = 45
+const LOW_DETAIL_URL = '/animated_helicopter_low.glb'
+
+/**
+ * The model is 43 separate parts (43 draw calls per helicopter, per pass). Everything that doesn't move is
+ * merged into one mesh per material; the rotors and the animated door (`keep`) stay separate.
+ */
+function mergeStaticParts(model: THREE.Object3D, keep: THREE.Object3D[]) {
+  model.updateMatrixWorld(true)
+  const toModel = new THREE.Matrix4().copy(model.matrixWorld).invert()
+  const kept = new Set<THREE.Object3D>()
+  for (const node of keep) node.traverse((child) => kept.add(child))
+  const buckets = new Map<string, { material: THREE.Material; geometries: THREE.BufferGeometry[]; meshes: THREE.Mesh[] }>()
+  model.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh || kept.has(mesh) || Array.isArray(mesh.material)) return
+    const layout = `${Object.keys(mesh.geometry.attributes).sort().join(',')}|${mesh.geometry.index ? 'indexed' : 'flat'}`
+    const key = `${mesh.material.uuid}|${layout}`
+    let bucket = buckets.get(key)
+    if (!bucket) buckets.set(key, (bucket = { material: mesh.material, geometries: [], meshes: [] }))
+    bucket.geometries.push(mesh.geometry.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(toModel, mesh.matrixWorld)))
+    bucket.meshes.push(mesh)
+  })
+  for (const bucket of buckets.values()) {
+    const merged = bucket.meshes.length > 1 ? mergeGeometries(bucket.geometries) : null
+    for (const geometry of bucket.geometries) geometry.dispose()
+    if (!merged) continue
+    for (const mesh of bucket.meshes) mesh.removeFromParent()
+    const mesh = new THREE.Mesh(merged, bucket.material)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    model.add(mesh)
+  }
+}
 
 /** Hard RPM ceiling — Space can never spool the propeller past this. */
 export const MAX_ROTOR_RPM = 100
@@ -35,10 +72,6 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
   const object = new THREE.Group()
   object.position.copy(padWorldPos)
 
-  const bodyLight = new THREE.PointLight(0xffd7a0, 9, 30)
-  bodyLight.position.set(2.5, 4.5, 1.5)
-  object.add(bodyLight)
-
   // --- Viewer-style rotor state ---
   const state = {
     rotorSpeed: 0,
@@ -50,6 +83,9 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
   // Rotor nodes found by name in the GLB
   let mainRotor: THREE.Object3D | null = null
   let tailRotor: THREE.Object3D | null = null
+  // Rotors of the low-detail copy spin in sync with the full model's
+  const lowMainRotors: THREE.Object3D[] = []
+  const lowTailRotors: THREE.Object3D[] = []
 
   // Synthesized rotors, only if the model ever ships without named ones
   let fallbackMainRotor: THREE.Object3D | null = null
@@ -155,6 +191,8 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       const spin = state.rotorSpeed
       if (mainRotor) mainRotor.rotation.z += spin * dt
       if (tailRotor) tailRotor.rotation.x += spin * 1.5 * dt
+      for (const rotor of lowMainRotors) rotor.rotation.z += spin * dt
+      for (const rotor of lowTailRotors) rotor.rotation.x += spin * 1.5 * dt
       if (fallbackMainRotor) fallbackMainRotor.rotation.y += (spin / 100) * 40 * dt
       if (fallbackTailRotor) fallbackTailRotor.rotation.x += (spin / 100) * 56 * dt
 
@@ -173,6 +211,37 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       }
       // While piloted, the flight controller owns position.y entirely
     },
+  }
+
+  /** Simplified copy for distance; same scale/offset so the swap is seamless. Optional: full detail stays if it fails. */
+  function loadLowDetail(lod: THREE.LOD, full: THREE.Object3D) {
+    new GLTFLoader().load(LOW_DETAIL_URL, (gltf) => {
+      const low = gltf.scene
+      low.scale.copy(full.scale)
+      low.position.copy(full.position)
+      const lowDoors: THREE.Object3D[] = []
+      low.traverse((node) => {
+        const mesh = node as THREE.Mesh
+        if (mesh.isMesh) {
+          mesh.castShadow = true
+          mesh.receiveShadow = true
+        }
+        const name = node.name.toLowerCase()
+        if (name.includes('rotor') || name.includes('propeller')) {
+          if (name.includes('main')) lowMainRotors.push(node)
+          else if (name.includes('rear') || name.includes('tail')) lowTailRotors.push(node)
+        }
+        if (name.startsWith('doors.003')) {
+          doorNodes.push(node)
+          lowDoors.push(node)
+          doorBaseRotations.set(node, node.rotation.y)
+        }
+      })
+      mergeStaticParts(low, [...lowMainRotors, ...lowTailRotors, ...lowDoors])
+      lod.addLevel(low, LOD_DISTANCE)
+      // Bullets test the light mesh only (nearly the same shape); ray tests against 236k triangles are slow
+      full.traverse((node) => { if ((node as THREE.Mesh).isMesh) node.raycast = () => {} })
+    }, undefined, (error) => console.warn('[helicopter] low-detail model unavailable, using full detail only:', error))
   }
 
   const loader = new GLTFLoader()
@@ -195,7 +264,10 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
       model.scale.setScalar(scale)
       model.position.y -= box.min.y * scale // sit on ground
 
-      object.add(model)
+      const lod = new THREE.LOD()
+      lod.addLevel(model, 0)
+      object.add(lod)
+      loadLowDetail(lod, model)
 
       // Find rotors by name: main_rotor__0 / rear_rotor_1 (also accept tail_*)
       model.traverse((node) => {
@@ -210,6 +282,8 @@ export function createHelicopter(padWorldPos: THREE.Vector3, onLoaded?: (h: Heli
           doorBaseRotations.set(node, node.rotation.y)
         }
       })
+
+      mergeStaticParts(model, [mainRotor, tailRotor, ...doorNodes].filter((node): node is THREE.Object3D => !!node))
 
       if (!mainRotor || !tailRotor) {
         console.warn(
