@@ -37,7 +37,7 @@ Then on the **API** machine point `DATABASE_URL` at the database machine's IP wi
 
 ## Deploying beyond localhost
 
-The client bakes the API origin in at build time: copy `client/.env.example` to `client/.env` and set `VITE_API_URL` to the public API origin before `npm run build`. On the server, set `CORS_ORIGINS` to the site origin(s) (comma-separated; localhost origins are always allowed) and optionally `PORT` (default 3002).
+Players open the site at `http://<server-ip>:5173`; the client calls the API on that same host at port 3002, so open TCP 5173 and 3002 in the firewall. To use a different API address, set `VITE_API_URL` in `client/.env` (inlined at build time). The API accepts any site origin unless `CORS_ORIGINS` (comma-separated) narrows it; `PORT` changes the API port (default 3002).
 
 ## Controls
 
