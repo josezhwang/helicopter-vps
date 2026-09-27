@@ -2,18 +2,20 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { loadModel, toStandardMaterial } from './assets'
 import { heightAt } from './terrain'
-import type { Team } from './bases'
+import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
 
 /**
- * Each team's motor pool: FLEET_SIZE helicopters on pads behind the base and FLEET_SIZE battle cars parked
- * beside it. Every vehicle is drawn with shared instanced meshes (a handful of draw calls for all 20);
- * the per-vehicle `object` only carries the pose and an invisible hitbox for bullets.
+ * Each team's motor pool: FLEET_SIZE helicopters on the base's landing area and FLEET_SIZE battle cars parked
+ * outside the gate. Anyone may use any of them. Every vehicle is drawn with shared instanced meshes (a
+ * handful of draw calls for all 20); the per-vehicle `object` only carries the pose and invisible hitboxes.
  */
 
 export type VehicleKind = 'heli' | 'car'
 export const FLEET_SIZE = 5
 /** Rotor speed ceiling (the HUD shows it x10). */
 export const MAX_ROTOR_RPM = 100
+/** Seats per vehicle: a helicopter has pilot, co-pilot and two rear seats; a car just its driver. */
+export const SEATS: Record<VehicleKind, number> = { heli: 4, car: 1 }
 
 const HELI_URL = '/models/helicopter.glb'
 const CAR_URL = '/models/battle_car.glb'
@@ -44,20 +46,30 @@ export const CAR_CIRCLE_RADIUS = 1.85
 export const CAR_CIRCLE_OFFSET = 1.45
 export const HELI_BODY_RADIUS = 3
 
+/**
+ * Helicopter seats (eye positions, in the model's own units before scaling): pilot front on the +X side,
+ * co-pilot front on the -X side, two rear seats. Seat i gets in through door i.
+ */
+const HELI_SEATS_MODEL: THREE.Vector3Tuple[] = [[0.31, 1.78, 0.62], [-0.31, 1.78, 0.62], [0.33, 1.8, -0.42], [-0.33, 1.8, -0.42]]
+/** How far doors swing open (radians). */
+const DOOR_OPEN = 1.25
+/** How long a door stays open while someone climbs in or out (ms). */
+export const DOOR_HOLD_MS = 1600
+
 /** Cars closer than this use the detailed model and cast shadows. */
 const CAR_DETAIL_DISTANCE = 75
 /** Vehicles further away than this are not drawn (a few pixels in the haze). */
 const VISIBLE_DISTANCE = 750
-const PAD_RADIUS = 5.5
 
 const TEAM_TINT: Record<Team, THREE.Color> = {
   blue: new THREE.Color(0.78, 0.9, 1.2),
   red: new THREE.Color(1.2, 0.82, 0.78),
 }
-const PAD_RING_COLOR: Record<Team, number> = { blue: 0x2e6fbd, red: 0xb03a2e }
+const WRECK_TINT = new THREE.Color(0.16, 0.14, 0.13)
 
 export interface Vehicle {
   id: string
+  /** The base it belongs to (paint and parking spot); anyone may drive it. */
   team: Team
   kind: VehicleKind
   index: number
@@ -69,14 +81,28 @@ export interface Vehicle {
   targetSpin: number
   /** Front-wheel angle (cars), radians, positive = turning left. */
   steer: number
-  /** Who is driving: a player id, or null when parked. */
-  pilot: string | null
+  /** Player in each seat (seat 0 flies / drives), null when empty. */
+  occupants: Array<string | null>
+  /** Shot down: a burnt-out wreck until it respawns at home. */
+  destroyed: boolean
+  /** Door opening 0..1 per seat (helicopters), and until when each is held open for someone climbing in/out. */
+  doors: number[]
+  doorHold: number[]
   /** Where it was parked at the start of the match. */
-  home: { x: number; z: number; yaw: number }
+  home: { x: number; y: number; z: number; yaw: number }
   rotorAngle: number
   tailAngle: number
   wheelAngle: number
   lastYaw: number
+}
+
+export const driverOf = (v: Vehicle) => v.occupants[0]
+
+export interface HeliSeat {
+  /** Eye position in the helicopter's local space (metres). */
+  eye: THREE.Vector3
+  /** Just outside the seat's door, at standing eye height (local space). */
+  outside: THREE.Vector3
 }
 
 export interface Fleet {
@@ -85,31 +111,27 @@ export interface Fleet {
   hitGroup: THREE.Group
   vehicles: Vehicle[]
   byId: Map<string, Vehicle>
-  /** Eye position inside a helicopter, in its local space. */
-  heliSeat: THREE.Vector3
-  /** Where a heli comes to rest at (x, z): its pad top, or the ground. */
+  heliSeats: HeliSeat[]
+  /** Where a vehicle comes to rest at (x, z). */
   restHeight: (v: Vehicle, x: number, z: number) => number
-  /** True where nature should not grow: pads and parking spots. */
+  /** True where nature should not grow: parking spots. */
   clearance: (x: number, z: number, margin?: number) => boolean
   /** Solid circles for things walking or driving around (vehicles on the ground). */
   circles: (skip?: Vehicle | null) => Array<{ x: number; z: number; r: number }>
+  /** Put a vehicle back on its home spot, parked and whole. */
+  sendHome: (v: Vehicle) => void
   update: (dt: number, camera: THREE.Vector3, localDriver: Vehicle | null) => void
 }
 
 interface Spot { kind: VehicleKind; team: Team; index: number; x: number; z: number; yaw: number }
 
-/**
- * Helicopter pads side by side behind each base (behind the back machine gun), noses toward the gate side;
- * battle cars side by side on the flank that faces the enemy, noses pointing away from the base.
- * Blue's gate faces +X, red's faces -X (the base is mirrored).
- */
-function fleetSpots(team: Team, center: THREE.Vector3): Spot[] {
-  const g = team === 'blue' ? 1 : -1
+function fleetSpots(team: Team): Spot[] {
   const spots: Spot[] = []
   for (let i = 0; i < FLEET_SIZE; i++) {
-    const lateral = (i - (FLEET_SIZE - 1) / 2)
-    spots.push({ kind: 'heli', team, index: i, x: center.x - 68 * g, z: center.z + lateral * 20 * g, yaw: (Math.PI / 2) * g })
-    spots.push({ kind: 'car', team, index: i, x: center.x + lateral * 12 * g, z: center.z + 64 * g, yaw: g > 0 ? 0 : Math.PI })
+    const heli = baseToWorld(team, ...LAYOUT.helis[i])
+    spots.push({ kind: 'heli', team, index: i, ...heli, yaw: baseYaw(team, LAYOUT.heliYaw) })
+    const car = baseToWorld(team, ...LAYOUT.cars[i])
+    spots.push({ kind: 'car', team, index: i, ...car, yaw: baseYaw(team, LAYOUT.carYaw) })
   }
   return spots
 }
@@ -122,10 +144,10 @@ type Piece = { geometry: THREE.BufferGeometry; material: THREE.Material }
  * Merge a loaded model into as few pieces as possible (model space, scaled): untextured materials become
  * vertex colours on one shared material, each textured material keeps its own piece.
  */
-function bakePieces(root: THREE.Object3D, scale: number, offset: THREE.Vector3, shared: THREE.MeshStandardMaterial): Piece[] {
+function bakePieces(root: THREE.Object3D, scale: number, shared: THREE.MeshStandardMaterial): Piece[] {
   root.updateMatrixWorld(true)
   const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert()
-  const place = new THREE.Matrix4().makeScale(scale, scale, scale).multiply(new THREE.Matrix4().makeTranslation(offset.x, offset.y, offset.z))
+  const place = new THREE.Matrix4().makeScale(scale, scale, scale)
   const colored: THREE.BufferGeometry[] = []
   const textured = new Map<THREE.Material, THREE.BufferGeometry[]>()
   root.traverse((node) => {
@@ -168,6 +190,43 @@ function bakePieces(root: THREE.Object3D, scale: number, offset: THREE.Vector3, 
   return pieces
 }
 
+/**
+ * Split a geometry into its connected pieces (vertices at the same spot count as joined), each returned
+ * as its own geometry with the same attributes.
+ */
+function splitPieces(geometry: THREE.BufferGeometry): THREE.BufferGeometry[] {
+  const position = geometry.attributes.position
+  const count = position.count
+  const parent = Int32Array.from({ length: count }, (_, i) => i)
+  const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] } return i }
+  const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb }
+  const seen = new Map<string, number>()
+  for (let i = 0; i < count; i++) {
+    const key = `${Math.round(position.getX(i) * 1e4)},${Math.round(position.getY(i) * 1e4)},${Math.round(position.getZ(i) * 1e4)}`
+    const first = seen.get(key)
+    if (first === undefined) seen.set(key, i)
+    else union(i, first)
+  }
+  const index = geometry.index ? Array.from(geometry.index.array) : [...Array(count).keys()]
+  for (let t = 0; t < index.length; t += 3) { union(index[t], index[t + 1]); union(index[t + 1], index[t + 2]) }
+  const groups = new Map<number, number[]>()
+  for (let t = 0; t < index.length; t += 3) {
+    const root = find(index[t])
+    if (!groups.has(root)) groups.set(root, [])
+    groups.get(root)!.push(index[t], index[t + 1], index[t + 2])
+  }
+  return [...groups.values()].map((triangles) => {
+    const piece = new THREE.BufferGeometry()
+    for (const [name, attribute] of Object.entries(geometry.attributes)) {
+      const size = attribute.itemSize
+      const data = new Float32Array(triangles.length * size)
+      triangles.forEach((v, i) => { for (let k = 0; k < size; k++) data[i * size + k] = attribute.getComponent(v, k) })
+      piece.setAttribute(name, new THREE.BufferAttribute(data, size))
+    }
+    return piece
+  })
+}
+
 /** Instanced copies of one piece; `count` is set every frame to the vehicles drawn with it. */
 function makeInstanced(piece: Piece, capacity: number, shadows: boolean, parent: THREE.Group) {
   const mesh = new THREE.InstancedMesh(piece.geometry, piece.material, capacity)
@@ -182,12 +241,12 @@ function makeInstanced(piece: Piece, capacity: number, shadows: boolean, parent:
   return mesh
 }
 
-export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
+export function createFleet(): Fleet {
   const group = new THREE.Group()
   group.name = 'vehicles'
   const hitGroup = new THREE.Group()
   hitGroup.name = 'vehicle-hitboxes'
-  const spots = [...fleetSpots('blue', bases.blue), ...fleetSpots('red', bases.red)]
+  const spots = [...fleetSpots('blue'), ...fleetSpots('red')]
   const hitMaterial = new THREE.MeshBasicMaterial({ visible: false })
   const vehicles: Vehicle[] = []
   const byId = new Map<string, Vehicle>()
@@ -195,7 +254,8 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
   for (const spot of spots) {
     const object = new THREE.Object3D()
     object.rotation.order = 'YXZ'
-    object.position.set(spot.x, heightAt(spot.x, spot.z), spot.z)
+    const y = heightAt(spot.x, spot.z)
+    object.position.set(spot.x, y, spot.z)
     object.rotation.y = spot.yaw
     const hitbox = new THREE.Group()
     const id = vehicleId(spot.team, spot.kind, spot.index)
@@ -206,50 +266,22 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
     hitbox.add(box)
     object.add(hitbox)
     hitGroup.add(object)
+    const seats = SEATS[spot.kind]
     const vehicle: Vehicle = {
       id, team: spot.team, kind: spot.kind, index: spot.index, object, hitbox,
-      spin: 0, targetSpin: 0, steer: 0, pilot: null,
-      home: { x: spot.x, z: spot.z, yaw: spot.yaw },
+      spin: 0, targetSpin: 0, steer: 0, occupants: Array(seats).fill(null), destroyed: false,
+      doors: Array(seats).fill(0), doorHold: Array(seats).fill(0),
+      home: { x: spot.x, y, z: spot.z, yaw: spot.yaw },
       rotorAngle: spot.index * 0.7, tailAngle: 0, wheelAngle: 0, lastYaw: spot.yaw,
     }
     vehicles.push(vehicle)
     byId.set(id, vehicle)
   }
 
-  // Helipads: a level slab set into the slope (level with the ground under the skids, the uphill rim runs into
-  // the hillside), deep enough to reach the ground on the downhill side
-  const pads = vehicles.filter((v) => v.kind === 'heli').map((v) => {
-    let top = -Infinity, bottom = Infinity
-    for (let a = 0; a < 16; a++) {
-      for (const r of [0, PAD_RADIUS * 0.5, PAD_RADIUS]) {
-        const h = heightAt(v.home.x + Math.cos((a / 16) * Math.PI * 2) * r, v.home.z + Math.sin((a / 16) * Math.PI * 2) * r)
-        if (r <= PAD_RADIUS * 0.5) top = Math.max(top, h)
-        bottom = Math.min(bottom, h)
-      }
-    }
-    return { vehicle: v, top: top + 0.12, bottom: bottom - 0.3 }
-  })
-  const slab = new THREE.InstancedMesh(new THREE.CylinderGeometry(PAD_RADIUS, PAD_RADIUS, 1, 28), new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.95 }), pads.length)
-  const ringGeometry = new THREE.TorusGeometry(PAD_RADIUS - 1.2, 0.22, 6, 40).rotateX(Math.PI / 2)
-  const ring = new THREE.InstancedMesh(ringGeometry, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 }), pads.length)
-  pads.forEach((pad, i) => {
-    const height = pad.top - pad.bottom
-    slab.setMatrixAt(i, new THREE.Matrix4().compose(new THREE.Vector3(pad.vehicle.home.x, pad.bottom + height / 2, pad.vehicle.home.z), new THREE.Quaternion(), new THREE.Vector3(1, height, 1)))
-    ring.setMatrixAt(i, new THREE.Matrix4().makeTranslation(pad.vehicle.home.x, pad.top + 0.02, pad.vehicle.home.z))
-    ring.setColorAt(i, new THREE.Color(PAD_RING_COLOR[pad.vehicle.team]))
-    pad.vehicle.object.position.y = pad.top
-  })
-  slab.receiveShadow = true
-  for (const mesh of [slab, ring]) { mesh.computeBoundingSphere(); mesh.frustumCulled = false; group.add(mesh) }
+  // Helicopters stand on the base's level concrete; cars on the ground outside
+  const restHeight = (_v: Vehicle, x: number, z: number) => heightAt(x, z) + 0.02
 
-  const restHeight = (v: Vehicle, x: number, z: number) => {
-    const ground = heightAt(x, z)
-    if (v.kind !== 'heli') return ground
-    const pad = pads.find((p) => Math.hypot(p.vehicle.home.x - x, p.vehicle.home.z - z) < PAD_RADIUS)
-    return pad ? Math.max(ground, pad.top) : ground
-  }
-
-  const clearance = (x: number, z: number, margin = 0) => spots.some((s) => Math.hypot(s.x - x, s.z - z) < (s.kind === 'heli' ? PAD_RADIUS + 2 : 5) + margin)
+  const clearance = (x: number, z: number, margin = 0) => spots.some((s) => Math.hypot(s.x - x, s.z - z) < (s.kind === 'heli' ? 8 : 5) + margin)
 
   const circles = (skip?: Vehicle | null) => {
     const out: Array<{ x: number; z: number; r: number }> = []
@@ -268,15 +300,32 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
     return out
   }
 
+  const sendHome = (v: Vehicle) => {
+    v.object.position.set(v.home.x, v.home.y, v.home.z)
+    v.object.rotation.set(0, v.home.yaw, 0)
+    v.spin = v.targetSpin = 0
+    v.steer = 0
+    v.destroyed = false
+    v.lastYaw = v.home.yaw
+  }
+
   // ---- Rendering (filled in once the models load) ----
-  interface HeliModel { statics: THREE.InstancedMesh[]; rotor: THREE.InstancedMesh[]; tail: THREE.InstancedMesh[]; rotorHub: THREE.Vector3; rotorAxis: THREE.Vector3; tailHub: THREE.Vector3; tailAxis: THREE.Vector3 }
+  interface Door { meshes: THREE.InstancedMesh[]; hinge: THREE.Vector3; swing: number }
+  interface HeliModel {
+    statics: THREE.InstancedMesh[]; rotor: THREE.InstancedMesh[]; tail: THREE.InstancedMesh[]; doors: Door[]
+    rotorHub: THREE.Vector3; rotorAxis: THREE.Vector3; tailHub: THREE.Vector3; tailAxis: THREE.Vector3
+  }
   interface CarLevel { body: THREE.InstancedMesh[]; wheels: THREE.InstancedMesh[] }
   let heliModel: HeliModel | null = null
   let carNear: CarLevel | null = null
   let carFar: CarLevel | null = null
-  const heliSeat = new THREE.Vector3(0, 2.3, 1.9)
   const helis = vehicles.filter((v) => v.kind === 'heli')
   const cars = vehicles.filter((v) => v.kind === 'car')
+  // Rough seats until the model loads (then placed from the model's own proportions)
+  const heliSeats: HeliSeat[] = HELI_SEATS_MODEL.map(([x, , z]) => ({
+    eye: new THREE.Vector3(x * HELI_SCALE, 2.2, z * HELI_SCALE),
+    outside: new THREE.Vector3(Math.sign(x) * 2.2, 1.7, z * HELI_SCALE),
+  }))
 
   const sharedMaterial = () => new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.35, flatShading: true })
 
@@ -298,19 +347,34 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
       }
       return 'static'
     }
-    const groups: Record<'static' | 'rotor' | 'tail', Array<{ geometry: THREE.BufferGeometry; material: THREE.Material }>> = { static: [], rotor: [], tail: [] }
+    const groups: Record<'static' | 'rotor' | 'tail', Piece[]> = { static: [], rotor: [], tail: [] }
     const place = new THREE.Matrix4().makeScale(HELI_SCALE, HELI_SCALE, HELI_SCALE).multiply(new THREE.Matrix4().makeTranslation(offset.x, offset.y, offset.z))
+    // The side windows are the doors: cut them out of the glass so they can swing open on their front edge
+    const doorPieces: Array<Piece[]> = [[], [], [], []]
     root.traverse((node) => {
       const mesh = node as THREE.Mesh
       if (!mesh.isMesh || Array.isArray(mesh.material)) return
       const geometry = mesh.geometry.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(place, toRoot.clone().multiply(mesh.matrixWorld)))
       const material = toStandardMaterial(mesh.material)
+      if (!material.transparent) {
+        groups[partOf(mesh)].push({ geometry, material })
+        return
+      }
       // Single pass for the see-through canopy (double-sided transparency draws twice)
-      if (material.transparent) { material.forceSinglePass = true; material.depthWrite = false }
-      groups[partOf(mesh)].push({ geometry, material })
+      material.forceSinglePass = true
+      material.depthWrite = false
+      const fixed: THREE.BufferGeometry[] = []
+      for (const piece of splitPieces(geometry)) {
+        piece.computeBoundingBox()
+        const c = piece.boundingBox!.getCenter(new THREE.Vector3())
+        if (Math.abs(c.x) < 0.6) { fixed.push(piece); continue }
+        doorPieces[(c.z > 0.4 ? 0 : 2) + (c.x > 0 ? 0 : 1)].push({ geometry: piece, material })
+      }
+      const rest = fixed.length > 1 ? mergeGeometries(fixed) : fixed[0]
+      if (rest) groups.static.push({ geometry: rest, material })
     })
     // Pivots (metres, vehicle space) and spin axes: each rotor turns about its thinnest direction
-    const pivot = (node: THREE.Object3D | undefined, pieces: Array<{ geometry: THREE.BufferGeometry }>) => {
+    const pivot = (node: THREE.Object3D | undefined, pieces: Piece[]) => {
       const bounds = new THREE.Box3()
       for (const p of pieces) { p.geometry.computeBoundingBox(); bounds.union(p.geometry.boundingBox!) }
       const size = bounds.getSize(new THREE.Vector3())
@@ -321,23 +385,31 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
     const main = pivot(rotorNode, groups.rotor)
     const tail = pivot(tailNode, groups.tail)
     const capacity = helis.length
+    const doors: Door[] = doorPieces.map((pieces, i) => {
+      const bounds = new THREE.Box3()
+      for (const p of pieces) { p.geometry.computeBoundingBox(); bounds.union(p.geometry.boundingBox!) }
+      const hinge = new THREE.Vector3((bounds.min.x + bounds.max.x) / 2, 0, bounds.max.z)
+      // The back edge swings outwards: +X doors turn negative, -X doors positive
+      return { meshes: pieces.map((p) => makeInstanced(p, capacity, false, group)), hinge, swing: i % 2 === 0 ? -DOOR_OPEN : DOOR_OPEN }
+    })
     heliModel = {
       statics: groups.static.map((p) => makeInstanced(p, capacity, true, group)),
       rotor: groups.rotor.map((p) => makeInstanced(p, capacity, true, group)),
       tail: groups.tail.map((p) => makeInstanced(p, capacity, false, group)),
+      doors,
       rotorHub: main.hub, rotorAxis: main.axis, tailHub: tail.hub, tailAxis: tail.axis,
     }
+    // Seats from the model's own proportions
+    HELI_SEATS_MODEL.forEach((seat, i) => {
+      const eye = new THREE.Vector3(...seat).applyMatrix4(place)
+      heliSeats[i].eye.copy(eye)
+      heliSeats[i].outside.set(Math.sign(seat[0]) * 2.3, 1.7, eye.z - 0.3)
+    })
     // Fit the hitboxes: cabin (everything ahead of the tail boom) and the boom back to the tail rotor
     const staticBounds = new THREE.Box3()
     for (const p of groups.static) { p.geometry.computeBoundingBox(); staticBounds.union(p.geometry.boundingBox!) }
     const cabinBack = main.hub.z - 1.6
     const cabinMin = new THREE.Vector3(-1.1, 0.35, cabinBack), cabinMax = new THREE.Vector3(1.1, main.hub.y - 0.45, staticBounds.max.z)
-    const glass = groups.static.find((p) => p.material.transparent)
-    if (glass) {
-      glass.geometry.computeBoundingBox()
-      const g = glass.geometry.boundingBox!
-      heliSeat.set(0, g.min.y + (g.max.y - g.min.y) * 0.72, g.min.z + (g.max.z - g.min.z) * 0.68)
-    }
     for (const v of helis) {
       v.hitbox.clear()
       const cabin = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hitMaterial)
@@ -352,8 +424,8 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
 
   const loadCar = async (bodyUrl: string, wheelUrl: string, shadows: boolean): Promise<CarLevel> => {
     const [body, wheel] = await Promise.all([loadModel(bodyUrl), loadModel(wheelUrl)])
-    const bodyPieces = bakePieces(body.scene, CAR_SCALE, new THREE.Vector3(), sharedMaterial())
-    const wheelPieces = bakePieces(wheel.scene, CAR_SCALE, new THREE.Vector3(), sharedMaterial())
+    const bodyPieces = bakePieces(body.scene, CAR_SCALE, sharedMaterial())
+    const wheelPieces = bakePieces(wheel.scene, CAR_SCALE, sharedMaterial())
     return {
       body: bodyPieces.map((p) => makeInstanced(p, cars.length, shadows, group)),
       // Wheel shadows are mostly hidden under the body's: 40 wheels aren't worth drawing twice
@@ -392,12 +464,19 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
     part.copy(toHub.makeTranslation(hub.x, hub.y, hub.z)).multiply(spinM.makeRotationAxis(axis, angle)).multiply(fromHub.makeTranslation(-hub.x, -hub.y, -hub.z))
 
   const update = (dt: number, camera: THREE.Vector3, localDriver: Vehicle | null) => {
+    const now = performance.now()
     for (const v of vehicles) {
       if (v.kind === 'heli') {
-        // Rotor winds up and down smoothly (also after the pilot leaves)
+        // Rotor winds up and down smoothly (also after the pilot leaves); a wreck's rotor is still
+        if (v.destroyed) v.targetSpin = v.spin = 0
         v.spin = THREE.MathUtils.clamp(THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 4 * dt)), 0, MAX_ROTOR_RPM)
         v.rotorAngle = (v.rotorAngle + v.spin * dt) % (Math.PI * 2)
         v.tailAngle = (v.tailAngle + v.spin * 1.5 * dt) % (Math.PI * 2)
+        // Passenger doors stay open (they shoot out of them); any door opens while someone climbs through
+        for (let seat = 0; seat < v.doors.length; seat++) {
+          const open = !v.destroyed && ((seat > 0 && v.occupants[seat] !== null) || now < v.doorHold[seat])
+          v.doors[seat] = THREE.MathUtils.clamp(v.doors[seat] + (open ? dt : -dt) * 2.5, 0, 1)
+        }
       } else {
         if (v !== localDriver) {
           v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
@@ -417,13 +496,17 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
         if (v.object.position.distanceToSquared(camera) > VISIBLE_DISTANCE ** 2) continue
         v.object.updateMatrix()
         m.copy(v.object.matrix)
-        const tint = TEAM_TINT[v.team]
+        const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
         setInstances(heliModel.statics, n, m, tint)
         setInstances(heliModel.rotor, n, spinAbout(heliModel.rotorHub, heliModel.rotorAxis, v.rotorAngle).premultiply(m), tint)
         setInstances(heliModel.tail, n, spinAbout(heliModel.tailHub, heliModel.tailAxis, v.tailAngle).premultiply(m), tint)
+        heliModel.doors.forEach((door, i) => {
+          const angle = door.swing * (1 - (1 - v.doors[i]) ** 2)
+          setInstances(door.meshes, n, spinAbout(door.hinge, yAxis, angle).premultiply(m), tint)
+        })
         n++
       }
-      finish([...heliModel.statics, ...heliModel.rotor, ...heliModel.tail], n)
+      finish([...heliModel.statics, ...heliModel.rotor, ...heliModel.tail, ...heliModel.doors.flatMap((d) => d.meshes)], n)
     }
 
     const near = carNear
@@ -437,7 +520,7 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
         const slot = level === near ? nearCount++ : farCount++
         v.object.updateMatrix()
         m.copy(v.object.matrix)
-        const tint = TEAM_TINT[v.team]
+        const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
         setInstances(level.body, slot, m, tint)
         WHEELS.forEach((w, i) => {
           const steer = w.front ? v.steer : 0
@@ -457,5 +540,5 @@ export function createFleet(bases: Record<Team, THREE.Vector3>): Fleet {
     }
   }
 
-  return { group, hitGroup, vehicles, byId, heliSeat, restHeight, clearance, circles, update }
+  return { group, hitGroup, vehicles, byId, heliSeats, restHeight, clearance, circles, sendHome, update }
 }

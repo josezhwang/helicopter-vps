@@ -4,11 +4,14 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import { AuthService } from './auth.service'
 import { RoomService, Team } from './room.service'
+import { GEM_PEDESTAL, MACHINE_GUN_SPOTS, WEAPON_ITEMS, initialItems, type Item, type ItemKind } from './game-layout'
 
 type Vec3 = [number, number, number]
 
 interface VehicleState {
   id: string
+  /** 0 flies / drives; helicopters have passenger seats 1-3. */
+  seat: number
   p: Vec3
   r: Vec3
   spin: number
@@ -19,6 +22,12 @@ interface PlayerState {
   yaw: number
   pitch: number
   vehicle: VehicleState | null
+  /** Manning a base machine gun. */
+  gun: { id: string; yaw: number; pitch: number } | null
+  /** Weapon in hand: 0 handgun, 1 primary, 2 launcher, -1 none. */
+  w: number
+  /** Loadout, [loaded, spare] per weapon (loaded -1 = not carried) — dropped where the player dies. */
+  inv: number[]
   flag: boolean
   hp: number
 }
@@ -38,30 +47,61 @@ interface Vitals {
   dead: boolean
   lastShotAt: number
   lastShotFxAt: number
+  lastMissileAt: number
+  lastDropAt: number
   respawnTimer?: NodeJS.Timeout
 }
 
+/** Per-room world state beyond the players: supplies on the ground, wrecks, where vehicles were left. */
+interface RoomWorld {
+  items: Map<string, Item>
+  /** Dropped items in the order they appeared (oldest removed first when there are too many). */
+  dropped: string[]
+  wrecks: Map<string, NodeJS.Timeout>
+  vehiclePoses: Map<string, { p: Vec3; r: Vec3 }>
+  timers: Set<NodeJS.Timeout>
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-/** Each team has 5 helicopters and 5 battle cars; must match client/src/game/world/vehicles.ts */
+/** Each base has 5 helicopters and 5 battle cars; must match client/src/game/world/vehicles.ts */
 const VEHICLE_ID = /^(blue|red)-(heli|car)-[0-4]$/
+const HELI_ID = /^(blue|red)-heli-[0-4]$/
+const GUN_ID = /^(blue|red)-mg-[0-4]$/
+const SEATS = { heli: 4, car: 1 }
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
-// Gem pedestal world XZ per team; must match the client (bases at ±380, GEM_LOCAL = base-local x -12)
-const GEM_PEDESTAL: Record<Team, [number, number]> = { blue: [-392, -380], red: [368, 380] }
 const MAX_HP = 100
 const RESPAWN_MS = 5000
 // Mirrors client/src/game/world/weapons.ts; the server never trusts client-sent damage
 const WEAPONS: Record<string, { power: number; fireRate: number; range: number }> = {
-  'primary-handgun': { power: 5, fireRate: 0.09, range: 200 },
-  smg: { power: 9, fireRate: 0.09, range: 220 },
-  'battle-rifle': { power: 18, fireRate: 0.18, range: 320 },
-  magnum: { power: 32, fireRate: 0.55, range: 380 },
+  handgun: { power: 15, fireRate: 0.28, range: 160 },
+  primary: { power: 9, fireRate: 0.1, range: 260 },
+  'machine-gun': { power: 45, fireRate: 0.7, range: 450 },
 }
+const WEAPON_KINDS = ['handgun', 'primary', 'launcher'] as const
+const MAG_SIZE = { handgun: 7, primary: 30, launcher: 1 }
+const MAX_SPARE = { handgun: 14, primary: 60, launcher: 4 }
+const MIN_FIRE_RATE = 0.1
 // Positions are up to one network tick stale on each side
 const RANGE_SLACK = 25
 const FIRE_RATE_SLACK = 0.6
+/** Anti-aircraft missiles: lock range, flight speed, how long a wreck lies before the helicopter is back. */
+const MISSILE_RANGE = 700
+const MISSILE_SPEED = 110
+const MISSILE_INTERVAL_MS = 1200
+const WRECK_MS = 30_000
+/** A player can reach supplies this far away (the client's reach plus lag). */
+const TAKE_REACH = 4.5
+const GUN_REACH = 5
+const RACK_RESPAWN_MS = 60_000
+const MAX_DROPPED = 80
 
 const num = (value: unknown, min: number, max: number) => (typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : null)
+const int = (value: unknown, min: number, max: number) => { const n = num(value, min, max); return n === null ? null : Math.round(n) }
+const dist2 = (a: [number, number] | Vec3, b: [number, number] | Vec3) => {
+  const ax = a[0], az = a.length === 3 ? a[2] : a[1], bx = b[0], bz = b.length === 3 ? b[2] : b[1]
+  return Math.hypot(ax - bx, az - bz)
+}
 
 function vec(value: unknown, limit: number, minY = -100, maxY = 500): Vec3 | null {
   if (!Array.isArray(value) || value.length !== 3) return null
@@ -83,13 +123,24 @@ function parseState(raw: unknown): PlayerState | null {
   if (s.vehicle && typeof s.vehicle === 'object') {
     const v = s.vehicle as Record<string, unknown>
     const id = typeof v.id === 'string' && VEHICLE_ID.test(v.id) ? v.id : null
+    const seat = int(v.seat ?? 0, 0, 3)
     const vp = vec(v.p, 500)
     const r = vec(v.r, 1e4, -1e4, 1e4)
     const spin = num(v.spin, -100, 100)
-    if (!id || !vp || !r || spin === null) return null
-    vehicle = { id, p: vp, r, spin }
+    if (!id || seat === null || seat >= SEATS[id.includes('-heli-') ? 'heli' : 'car'] || !vp || !r || spin === null) return null
+    vehicle = { id, seat, p: vp, r, spin }
   }
-  return { p, yaw, pitch, vehicle, flag: s.flag === true, hp }
+  let gun: PlayerState['gun'] = null
+  if (s.gun && typeof s.gun === 'object') {
+    const g = s.gun as Record<string, unknown>
+    const gunYaw = num(g.yaw, -1e4, 1e4)
+    const gunPitch = num(g.pitch, -Math.PI, Math.PI)
+    if (typeof g.id !== 'string' || !GUN_ID.test(g.id) || gunYaw === null || gunPitch === null) return null
+    gun = { id: g.id, yaw: gunYaw, pitch: gunPitch }
+  }
+  const w = int(s.w ?? -1, -1, 2) ?? -1
+  const inv = Array.isArray(s.inv) && s.inv.length === 6 ? s.inv.map((n, i) => int(n, i % 2 === 0 ? -1 : 0, 60) ?? 0) : [-1, 0, -1, 0, -1, 0]
+  return { p, yaw, pitch, vehicle, gun, w, inv, flag: s.flag === true, hp }
 }
 
 @Injectable()
@@ -97,8 +148,8 @@ export class RealtimeService implements OnModuleDestroy {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 })
   private readonly rooms = new Map<string, Map<string, Connection>>()
   private readonly vitals = new Map<string, Map<string, Vitals>>()
-  /** Where each vehicle was last seen per room, so players joining later see parked vehicles where they were left. */
-  private readonly vehiclePoses = new Map<string, Map<string, { p: Vec3; r: Vec3 }>>()
+  private readonly worlds = new Map<string, RoomWorld>()
+  private dropCounter = 0
   private heartbeat?: NodeJS.Timeout
 
   constructor(private readonly auth: AuthService, private readonly roomService: RoomService) {}
@@ -123,7 +174,7 @@ export class RealtimeService implements OnModuleDestroy {
 
   onModuleDestroy() {
     clearInterval(this.heartbeat)
-    for (const roomId of this.vitals.keys()) this.clearVitals(roomId)
+    for (const roomId of new Set([...this.vitals.keys(), ...this.worlds.keys()])) this.clearRoom(roomId)
     for (const ws of this.wss.clients) ws.terminate()
     this.wss.close()
   }
@@ -151,26 +202,14 @@ export class RealtimeService implements OnModuleDestroy {
       }
 
       const { roomId, conn } = joined
-      if (message.type === 'state') {
-        const now = Date.now()
-        if (now - conn.lastStateAt < MIN_STATE_INTERVAL_MS) return
-        const state = parseState(message.s)
-        if (!state) return
-        conn.lastStateAt = now
-        state.hp = this.vitalsOf(roomId, conn.userId).hp
-        if (state.vehicle && !this.claimVehicle(roomId, conn, state.vehicle)) {
-          // Own team's vehicles only, one player per vehicle: whoever was in it first keeps it
-          this.send(conn.ws, { type: 'eject', vehicle: state.vehicle.id })
-          state.vehicle = null
-        }
-        conn.state = state
-        this.broadcast(roomId, { type: 'state', id: conn.userId, s: state }, conn.userId)
-      } else if (message.type === 'shot') {
-        this.shot(roomId, conn, message)
-      } else if (message.type === 'hit') {
-        this.hit(roomId, conn, message)
-      } else if (message.type === 'capture') {
-        await this.capture(roomId, conn)
+      switch (message.type) {
+        case 'state': this.state(roomId, conn, message); break
+        case 'shot': this.shot(roomId, conn, message); break
+        case 'hit': this.hit(roomId, conn, message); break
+        case 'missile': this.missile(roomId, conn, message); break
+        case 'take': this.take(roomId, conn, message); break
+        case 'drop': this.drop(roomId, conn, message); break
+        case 'capture': await this.capture(roomId, conn); break
       }
     })
 
@@ -215,77 +254,285 @@ export class RealtimeService implements OnModuleDestroy {
       const vitals = this.vitalsOf(roomId, player.id)
       return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null, hp: vitals.hp, dead: vitals.dead }
     })
-    this.send(ws, { type: 'welcome', you: user.id, players, vehicles: Object.fromEntries(this.vehiclePoses.get(roomId) ?? []) })
+    const world = this.worldOf(roomId)
+    this.send(ws, {
+      type: 'welcome', you: user.id, players,
+      vehicles: Object.fromEntries(world.vehiclePoses),
+      items: [...world.items.values()],
+      wrecks: [...world.wrecks.keys()],
+    })
     const myVitals = this.vitalsOf(roomId, user.id)
     this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null, hp: myVitals.hp, dead: myVitals.dead } }, user.id)
     return { roomId, conn }
   }
 
-  private claimVehicle(roomId: string, conn: Connection, vehicle: VehicleState) {
-    if (!vehicle.id.startsWith(`${conn.team}-`)) return false
-    for (const other of this.rooms.get(roomId)?.values() ?? []) {
-      if (other !== conn && other.state?.vehicle?.id === vehicle.id && !this.vitalsOf(roomId, other.userId).dead) return false
+  private worldOf(roomId: string): RoomWorld {
+    let world = this.worlds.get(roomId)
+    if (!world) {
+      world = { items: new Map(initialItems().map((item) => [item.id, item])), dropped: [], wrecks: new Map(), vehiclePoses: new Map(), timers: new Set() }
+      this.worlds.set(roomId, world)
     }
-    let poses = this.vehiclePoses.get(roomId)
-    if (!poses) this.vehiclePoses.set(roomId, (poses = new Map()))
-    poses.set(vehicle.id, { p: vehicle.p, r: vehicle.r })
-    return true
+    return world
+  }
+
+  private later(roomId: string, ms: number, fn: () => void) {
+    const world = this.worldOf(roomId)
+    const timer = setTimeout(() => { world.timers.delete(timer); fn() }, ms)
+    world.timers.add(timer)
+    return timer
   }
 
   private vitalsOf(roomId: string, userId: string): Vitals {
     let room = this.vitals.get(roomId)
     if (!room) this.vitals.set(roomId, (room = new Map()))
     let vitals = room.get(userId)
-    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0 }))
+    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0, lastMissileAt: 0, lastDropAt: 0 }))
     return vitals
   }
 
-  private clearVitals(roomId: string) {
+  private clearRoom(roomId: string) {
     for (const vitals of this.vitals.get(roomId)?.values() ?? []) clearTimeout(vitals.respawnTimer)
     this.vitals.delete(roomId)
-    this.vehiclePoses.delete(roomId)
+    const world = this.worlds.get(roomId)
+    if (world) {
+      for (const timer of world.timers) clearTimeout(timer)
+      for (const timer of world.wrecks.values()) clearTimeout(timer)
+    }
+    this.worlds.delete(roomId)
   }
 
-  /** Relay a fired shot so everyone else sees the muzzle flash and tracer. */
+  private state(roomId: string, conn: Connection, message: Record<string, unknown>) {
+    const now = Date.now()
+    if (now - conn.lastStateAt < MIN_STATE_INTERVAL_MS) return
+    const state = parseState(message.s)
+    if (!state) return
+    conn.lastStateAt = now
+    const vitals = this.vitalsOf(roomId, conn.userId)
+    state.hp = vitals.hp
+    if (vitals.dead) {
+      state.vehicle = null
+      state.gun = null
+    }
+    if (state.vehicle && !this.claimSeat(roomId, conn, state.vehicle)) {
+      // One player per seat, whoever got in first keeps it; wrecks can't be boarded
+      this.send(conn.ws, { type: 'eject', vehicle: state.vehicle.id })
+      state.vehicle = null
+    }
+    if (state.gun && !this.claimGun(roomId, conn, state)) {
+      this.send(conn.ws, { type: 'ungun', gun: state.gun.id })
+      state.gun = null
+    }
+    conn.state = state
+    this.broadcast(roomId, { type: 'state', id: conn.userId, s: state }, conn.userId)
+  }
+
+  private occupants(roomId: string, vehicleId: string) {
+    return [...(this.rooms.get(roomId)?.values() ?? [])].filter((c) => c.state?.vehicle?.id === vehicleId && !this.vitalsOf(roomId, c.userId).dead)
+  }
+
+  private claimSeat(roomId: string, conn: Connection, vehicle: VehicleState) {
+    const world = this.worldOf(roomId)
+    if (world.wrecks.has(vehicle.id)) return false
+    const taken = this.occupants(roomId, vehicle.id).some((other) => other !== conn && other.state!.vehicle!.seat === vehicle.seat)
+    if (taken) return false
+    if (vehicle.seat === 0) world.vehiclePoses.set(vehicle.id, { p: vehicle.p, r: vehicle.r })
+    return true
+  }
+
+  private claimGun(roomId: string, conn: Connection, state: PlayerState) {
+    const spot = MACHINE_GUN_SPOTS.get(state.gun!.id)
+    if (!spot || state.vehicle || dist2(spot, state.p) > GUN_REACH) return false
+    for (const other of this.rooms.get(roomId)?.values() ?? []) {
+      if (other !== conn && other.state?.gun?.id === state.gun!.id && !this.vitalsOf(roomId, other.userId).dead) return false
+    }
+    return true
+  }
+
+  /** Relay a fired shot so everyone else sees the muzzle flash and the round. */
   private shot(roomId: string, shooter: Connection, message: Record<string, unknown>) {
     const to = vec(message.to, 600, -100, 600)
     const vitals = this.vitalsOf(roomId, shooter.userId)
     if (!to || vitals.dead) return
     const now = Date.now()
-    if (now - vitals.lastShotFxAt < WEAPONS['primary-handgun'].fireRate * 1000 * FIRE_RATE_SLACK) return
+    if (now - vitals.lastShotFxAt < MIN_FIRE_RATE * 1000 * FIRE_RATE_SLACK) return
     vitals.lastShotFxAt = now
-    this.broadcast(roomId, { type: 'shot', id: shooter.userId, to }, shooter.userId)
+    const w = typeof message.w === 'string' && message.w in WEAPONS ? message.w : 'primary'
+    this.broadcast(roomId, { type: 'shot', id: shooter.userId, to, w }, shooter.userId)
+  }
+
+  /** Where a shooter fires from: their machine gun, their vehicle, or where they stand. */
+  private firingPoint(state: PlayerState): [number, number] | Vec3 {
+    if (state.gun) return MACHINE_GUN_SPOTS.get(state.gun.id) ?? state.p
+    return state.vehicle?.p ?? state.p
   }
 
   private hit(roomId: string, shooter: Connection, message: Record<string, unknown>) {
-    const weapon = WEAPONS[typeof message.weapon === 'string' ? message.weapon : '']
+    const weaponId = typeof message.weapon === 'string' ? message.weapon : ''
+    const weapon = WEAPONS[weaponId]
     const target = typeof message.target === 'string' ? this.rooms.get(roomId)?.get(message.target) : undefined
     if (!weapon || !target || target.team === shooter.team || !shooter.state || !target.state) return
+    // The machine gun only hits from behind a machine gun, and hand weapons not from one
+    if ((weaponId === 'machine-gun') !== !!shooter.state.gun) return
     const shooterVitals = this.vitalsOf(roomId, shooter.userId)
     const targetVitals = this.vitalsOf(roomId, target.userId)
     if (shooterVitals.dead || targetVitals.dead) return
 
     const now = Date.now()
     if (now - shooterVitals.lastShotAt < weapon.fireRate * 1000 * FIRE_RATE_SLACK) return
-    const from = shooter.state.vehicle?.p ?? shooter.state.p
+    const from = this.firingPoint(shooter.state)
     const to = target.state.vehicle?.p ?? target.state.p
-    if (Math.hypot(from[0] - to[0], from[1] - to[1], from[2] - to[2]) > weapon.range + RANGE_SLACK) return
+    if (dist2(from, to) > weapon.range + RANGE_SLACK) return
     shooterVitals.lastShotAt = now
 
     targetVitals.hp = Math.max(0, targetVitals.hp - weapon.power)
     this.broadcast(roomId, { type: 'hp', id: target.userId, hp: targetVitals.hp, by: shooter.userId })
-    if (targetVitals.hp > 0) return
+    if (targetVitals.hp <= 0) this.kill(roomId, target, shooter.userId)
+  }
 
-    targetVitals.dead = true
-    target.state.flag = false
-    // A dead player's vehicle is free again (it stays where it was)
-    target.state.vehicle = null
-    this.broadcast(roomId, { type: 'killed', id: target.userId, by: shooter.userId })
-    targetVitals.respawnTimer = setTimeout(() => {
-      targetVitals.hp = MAX_HP
-      targetVitals.dead = false
+  /** A player dies: everyone is told, what they carried is left on the ground, and they respawn in 5s. */
+  private kill(roomId: string, target: Connection, by: string) {
+    const vitals = this.vitalsOf(roomId, target.userId)
+    if (vitals.dead) return
+    vitals.hp = 0
+    vitals.dead = true
+    this.broadcast(roomId, { type: 'hp', id: target.userId, hp: 0, by })
+    this.broadcast(roomId, { type: 'killed', id: target.userId, by })
+    const state = target.state
+    if (state) {
+      const where = state.vehicle?.p ?? state.p
+      WEAPON_KINDS.forEach((kind, i) => {
+        const mag = state.inv[i * 2], spare = state.inv[i * 2 + 1]
+        if (mag >= 0) this.addDropped(roomId, kind, where, mag, spare)
+        else if (kind === 'launcher' && spare > 0) this.addDropped(roomId, 'missiles', where, 0, spare)
+      })
+      state.flag = false
+      state.vehicle = null
+      state.gun = null
+      state.inv = [-1, 0, -1, 0, -1, 0]
+    }
+    vitals.respawnTimer = setTimeout(() => {
+      vitals.hp = MAX_HP
+      vitals.dead = false
       this.broadcast(roomId, { type: 'respawn', id: target.userId })
     }, RESPAWN_MS)
+  }
+
+  /**
+   * An anti-aircraft missile, fired after a 2s lock on a helicopter with an enemy aboard. Everyone sees it fly;
+   * when it arrives the helicopter is destroyed with everyone in it, and it is back at home 30s later.
+   */
+  private missile(roomId: string, shooter: Connection, message: Record<string, unknown>) {
+    const targetId = typeof message.target === 'string' && HELI_ID.test(message.target) ? message.target : null
+    const state = shooter.state
+    const vitals = this.vitalsOf(roomId, shooter.userId)
+    const world = this.worldOf(roomId)
+    if (!targetId || !state || vitals.dead || state.vehicle || state.gun || world.wrecks.has(targetId)) return
+    const now = Date.now()
+    if (now - vitals.lastMissileAt < MISSILE_INTERVAL_MS) return
+    const aboard = this.occupants(roomId, targetId)
+    if (!aboard.some((c) => c.team !== shooter.team)) return
+    const at = aboard.find((c) => c.state!.vehicle!.seat === 0)?.state!.vehicle!.p ?? aboard[0].state!.vehicle!.p
+    const distance = Math.hypot(at[0] - state.p[0], at[1] - state.p[1], at[2] - state.p[2])
+    if (distance > MISSILE_RANGE + RANGE_SLACK) return
+    vitals.lastMissileAt = now
+    this.broadcast(roomId, { type: 'missile', id: shooter.userId, target: targetId, from: state.p }, shooter.userId)
+    this.later(roomId, (distance / MISSILE_SPEED) * 1000 + 400, () => this.destroyVehicle(roomId, targetId, shooter.userId))
+  }
+
+  private destroyVehicle(roomId: string, vehicleId: string, by: string) {
+    const world = this.worlds.get(roomId)
+    if (!world || world.wrecks.has(vehicleId)) return
+    const aboard = this.occupants(roomId, vehicleId)
+    const pilot = aboard.find((c) => c.state!.vehicle!.seat === 0)
+    if (pilot) world.vehiclePoses.set(vehicleId, { p: pilot.state!.vehicle!.p, r: pilot.state!.vehicle!.r })
+    this.broadcast(roomId, { type: 'wrecked', id: vehicleId, by, at: world.vehiclePoses.get(vehicleId) ?? null })
+    for (const conn of aboard) this.kill(roomId, conn, by)
+    world.wrecks.set(vehicleId, this.later(roomId, WRECK_MS, () => {
+      world.wrecks.delete(vehicleId)
+      world.vehiclePoses.delete(vehicleId)
+      this.broadcast(roomId, { type: 'repaired', id: vehicleId })
+    }))
+  }
+
+  private itemUpdate(roomId: string, item: Item) {
+    this.broadcast(roomId, { type: 'item', item })
+  }
+
+  private removeItem(roomId: string, id: string) {
+    const world = this.worldOf(roomId)
+    world.items.delete(id)
+    world.dropped = world.dropped.filter((d) => d !== id)
+    this.broadcast(roomId, { type: 'itemGone', id })
+  }
+
+  private addDropped(roomId: string, kind: ItemKind, where: Vec3, mag: number, count: number) {
+    const world = this.worldOf(roomId)
+    const id = `drop-${++this.dropCounter}`
+    const angle = Math.random() * Math.PI * 2, spread = 0.6 + Math.random() * 0.8
+    const item: Item = { id, kind, x: where[0] + Math.cos(angle) * spread, z: where[2] + Math.sin(angle) * spread, yaw: Math.random() * Math.PI * 2, count, mag, fixed: false }
+    world.items.set(id, item)
+    world.dropped.push(id)
+    this.itemUpdate(roomId, item)
+    while (world.dropped.length > MAX_DROPPED) this.removeItem(roomId, world.dropped[0])
+  }
+
+  /**
+   * [G] on a supply: `weapon` takes a weapon we don't carry (with its loaded rounds and up to `want` spare);
+   * `ammo` takes up to `want` rounds / missiles out of it. Only the server decides who gets what.
+   */
+  private take(roomId: string, conn: Connection, message: Record<string, unknown>) {
+    const world = this.worldOf(roomId)
+    const item = typeof message.id === 'string' ? world.items.get(message.id) : undefined
+    const want = int(message.want, 0, 120) ?? 0
+    const mode = message.mode === 'weapon' ? 'weapon' : 'ammo'
+    const state = conn.state
+    const refuse = () => this.send(conn.ws, { type: 'took', id: message.id, kind: item?.kind ?? null, mode, mag: 0, count: 0, weapon: false })
+    if (!item || item.gone || !state || state.vehicle || state.gun || this.vitalsOf(roomId, conn.userId).dead || dist2([item.x, item.z], state.p) > TAKE_REACH) return refuse()
+
+    if (mode === 'weapon') {
+      if (!WEAPON_ITEMS.includes(item.kind)) return refuse()
+      const count = Math.min(item.count, want)
+      this.send(conn.ws, { type: 'took', id: item.id, kind: item.kind, mode, mag: item.mag, count, weapon: true })
+      if (item.fixed) {
+        // A rack launcher comes back a minute later (empty: missiles come from the crates)
+        item.gone = true
+        this.itemUpdate(roomId, item)
+        this.later(roomId, RACK_RESPAWN_MS, () => {
+          item.gone = false
+          item.mag = 0
+          item.count = 0
+          this.itemUpdate(roomId, item)
+        })
+      } else {
+        this.removeItem(roomId, item.id)
+      }
+      return
+    }
+
+    const isWeapon = WEAPON_ITEMS.includes(item.kind)
+    const available = item.count + (isWeapon ? item.mag : 0)
+    const give = Math.min(want, available)
+    if (give <= 0) return refuse()
+    const fromCount = Math.min(item.count, give)
+    item.count -= fromCount
+    if (isWeapon) item.mag -= give - fromCount
+    this.send(conn.ws, { type: 'took', id: item.id, kind: item.kind, mode, mag: 0, count: give, weapon: false })
+    if (!item.fixed && !isWeapon && item.count <= 0) this.removeItem(roomId, item.id)
+    else this.itemUpdate(roomId, item)
+  }
+
+  /** [G] with nothing in reach: put the weapon in hand down (with its rounds) for anyone to pick up. */
+  private drop(roomId: string, conn: Connection, message: Record<string, unknown>) {
+    const kind = typeof message.kind === 'string' && (WEAPON_KINDS as readonly string[]).includes(message.kind) ? (message.kind as (typeof WEAPON_KINDS)[number]) : null
+    const vitals = this.vitalsOf(roomId, conn.userId)
+    const state = conn.state
+    if (!kind || !state || vitals.dead || state.vehicle || state.gun) return
+    const now = Date.now()
+    if (now - vitals.lastDropAt < 300) return
+    vitals.lastDropAt = now
+    const mag = int(message.mag, 0, MAG_SIZE[kind]) ?? 0
+    const count = int(message.count, 0, MAX_SPARE[kind]) ?? 0
+    this.addDropped(roomId, kind, state.p, mag, count)
   }
 
   private async capture(roomId: string, conn: Connection) {
@@ -295,7 +542,7 @@ export class RealtimeService implements OnModuleDestroy {
     if (Math.hypot(state.p[0] - fx, state.p[2] - fz) > CAPTURE_RADIUS) return
     if (!(await this.roomService.finish(roomId))) return
     this.broadcast(roomId, { type: 'end', winner: conn.team, by: conn.userId })
-    this.clearVitals(roomId)
+    this.clearRoom(roomId)
   }
 
   private broadcast(roomId: string, payload: object, exceptUserId?: string) {
@@ -311,3 +558,4 @@ export class RealtimeService implements OnModuleDestroy {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
   }
 }
+

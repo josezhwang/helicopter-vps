@@ -1,66 +1,51 @@
 /**
- * Weapon definitions. The starting handgun is deliberately weak;
- * field pickups are stronger. Damage scales per weapon.
+ * Carried weapons. Every player starts with the handgun and the primary gun; the anti-aircraft launcher is
+ * picked up from a base rack. "Loads" are magazines: the gun holds one, the rest are carried spare.
+ * The server has its own copy of power / fire rate / range and never trusts the client's damage.
  */
-export type WeaponId = 'primary-handgun' | 'smg' | 'battle-rifle' | 'magnum'
+export type WeaponKind = 'handgun' | 'primary' | 'launcher'
+export const WEAPON_KINDS: WeaponKind[] = ['handgun', 'primary', 'launcher']
 
 export interface WeaponDef {
-  id: WeaponId
+  kind: WeaponKind
   name: string
-  /** Damage per bullet. */
+  /** Damage per bullet (the launcher's missile destroys a helicopter outright). */
   power: number
   magSize: number
-  fireRate: number // seconds between shots
+  /** Spare rounds you can carry on top of the loaded magazine. */
+  maxReserve: number
+  /** Seconds between shots. */
+  fireRate: number
   range: number
-  /** Spread in radians (handgun accurate, SMG sprayier). */
+  /** Spread in radians. */
   spread: number
-  color: number
   reloadTime: number
+  /** Keeps firing while the button is held (otherwise one shot per click). */
+  automatic: boolean
+  /** What the round looks like in flight. */
+  bullet: 'bullet_9mm' | 'bullet_556' | null
+  color: number
 }
 
-export const WEAPONS: Record<WeaponId, WeaponDef> = {
-  'primary-handgun': {
-    id: 'primary-handgun',
-    name: 'Primary Handgun',
-    power: 5,
-    magSize: 30,
-    fireRate: 0.09,
-    range: 200,
-    spread: 0.004,
-    color: 0xffe8a3,
-    reloadTime: 1,
+export const WEAPONS: Record<WeaponKind, WeaponDef> = {
+  handgun: {
+    kind: 'handgun', name: 'Handgun', power: 15, magSize: 7, maxReserve: 14, fireRate: 0.28, range: 160,
+    spread: 0.006, reloadTime: 1.2, automatic: false, bullet: 'bullet_9mm', color: 0xffe8a3,
   },
-  smg: {
-    id: 'smg',
-    name: 'SMG',
-    power: 9,
-    magSize: 30,
-    fireRate: 0.09,
-    range: 220,
-    spread: 0.02,
-    color: 0xa3e0ff,
-    reloadTime: 1.8,
+  primary: {
+    kind: 'primary', name: 'Primary Gun', power: 9, magSize: 30, maxReserve: 60, fireRate: 0.1, range: 260,
+    spread: 0.012, reloadTime: 1.8, automatic: true, bullet: 'bullet_556', color: 0xffd27a,
   },
-  'battle-rifle': {
-    id: 'battle-rifle',
-    name: 'Battle Rifle',
-    power: 18,
-    magSize: 20,
-    fireRate: 0.18,
-    range: 320,
-    spread: 0.006,
-    color: 0xd0ffa3,
-    reloadTime: 2.2,
-  },
-  magnum: {
-    id: 'magnum',
-    name: 'Magnum',
-    power: 32,
-    magSize: 6,
-    fireRate: 0.55,
-    range: 380,
-    spread: 0.002,
-    color: 0xffc0a3,
-    reloadTime: 2.6,
+  launcher: {
+    kind: 'launcher', name: 'AA Launcher', power: 0, magSize: 1, maxReserve: 4, fireRate: 1.5, range: 700,
+    spread: 0, reloadTime: 2.2, automatic: false, bullet: null, color: 0xffffff,
   },
 }
+
+/** Base machine guns: slow but hard-hitting. */
+export const MACHINE_GUN = { id: 'machine-gun', power: 45, fireRate: 0.7, range: 450, spread: 0.004, color: 0xffb35a }
+
+/** Holding the launcher on an enemy aircraft this long locks on. */
+export const LOCK_TIME = 2
+/** How far off the crosshair (radians) an aircraft can be and still count as aimed at. */
+export const LOCK_CONE = 0.07

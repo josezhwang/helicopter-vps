@@ -6,7 +6,7 @@ const MODEL_URL = '/models/machinegun.glb'
 /** Simplified copy for distance; its bolts and other tiny pieces are dropped entirely (invisible that far). */
 const FAR_MODEL_URL = '/models/machinegun_far.glb'
 /** Guns closer than this use the detailed model and cast shadows. */
-const DETAIL_DISTANCE = 70
+const DETAIL_DISTANCE = 35
 /** Pieces smaller than this (model units, ~17cm in game) are left out of the far model. */
 const TINY_PIECE = 0.3
 /** Height of a turret from the ground to the top of the gun, in metres. */
@@ -29,6 +29,8 @@ type Part = 'base' | 'yaw' | 'pitch'
 const PARTS: Part[] = ['base', 'yaw', 'pitch']
 
 export interface TurretPlacement {
+  /** `<team>-mg-<n>`: the server tracks who is on which gun. */
+  id: string
   x: number
   z: number
   /** Direction the barrel points when centred (radians, 0 = +Z). */
@@ -41,6 +43,8 @@ export interface Turret extends TurretPlacement {
   pitch: number
   /** While true the gun slowly scans on its own; set false to aim it by setting yaw/pitch. */
   idle: boolean
+  /** Player manning it (null = free). */
+  occupant: string | null
 }
 
 interface Frame {
@@ -52,6 +56,8 @@ interface Frame {
 
 interface SplitModel extends Frame {
   pieces: Record<Part, Array<{ geometry: THREE.BufferGeometry; material: THREE.Material }>>
+  /** How far the barrel reaches in front of the tilt axle (model units). */
+  barrel: number
 }
 
 type Lod = 'near' | 'far'
@@ -185,7 +191,9 @@ async function buildSplit(url: string, dropTiny: boolean, frame?: Frame): Promis
       pieces[builder.part].push({ geometry, material: builder.material })
     }
     const scale = frame?.scale ?? TURRET_HEIGHT / (all.max.y - all.min.y)
-    return { pieces, scale, lift: frame?.lift ?? -all.min.y * scale, yawPivot, pitchPivot }
+    let barrel = 0
+    for (const piece of pieces.pitch) { piece.geometry.computeBoundingBox(); barrel = Math.max(barrel, piece.geometry.boundingBox!.max.z) }
+    return { pieces, scale, lift: frame?.lift ?? -all.min.y * scale, yawPivot, pitchPivot, barrel }
   }
 }
 
@@ -196,6 +204,8 @@ export interface TurretField {
   turrets: Turret[]
   /** Idle scan + distance culling; call once per frame. */
   update: (time: number, camera: THREE.Vector3) => void
+  /** Where the gunner's eye is and where the barrel ends, for a gun at its current aim (world space). */
+  gunnerView: (t: Turret, eye: THREE.Vector3, muzzle: THREE.Vector3) => void
 }
 
 /** Machine-gun emplacements, one instanced set per base (a few draw calls per base, not per gun). */
@@ -204,7 +214,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
   group.name = 'turrets'
   const circles: TurretField['circles'] = []
   const sets = bases.map((base) => {
-    const turrets: Turret[] = base.placements.map((pl) => ({ ...pl, yaw: 0, pitch: 0, idle: true }))
+    const turrets: Turret[] = base.placements.map((pl) => ({ ...pl, yaw: 0, pitch: 0, idle: true, occupant: null }))
     for (const t of turrets) circles.push({ x: t.x, z: t.z, r: TURRET_BLOCK_RADIUS })
     const setGroup = new THREE.Group()
     group.add(setGroup)
@@ -268,7 +278,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
             mesh.receiveShadow = true
             mesh.name = `turret-${lod}-${part}`
             // One sphere around the whole emplacement ring: cheap culling that survives the guns turning
-            mesh.boundingSphere = new THREE.Sphere(set.center.clone().setY(heightAt(set.center.x, set.center.z)), 75)
+            mesh.boundingSphere = new THREE.Sphere(set.center.clone().setY(heightAt(set.center.x, set.center.z)), 90)
             set.meshes[lod][part].push(mesh)
             set.group.add(mesh)
           }
@@ -278,9 +288,31 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
     }
   })
 
+  const pivot = new THREE.Vector3()
+  const gunnerView = (t: Turret, eye: THREE.Vector3, muzzle: THREE.Vector3) => {
+    const heading = t.facing + t.yaw
+    const dir = new THREE.Vector3(Math.sin(heading) * Math.cos(t.pitch), -Math.sin(t.pitch), Math.cos(heading) * Math.cos(t.pitch))
+    if (!models) {
+      pivot.set(t.x, heightAt(t.x, t.z) + TURRET_HEIGHT * 0.8, t.z)
+      muzzle.copy(pivot).addScaledVector(dir, 1.5)
+    } else {
+      const frame = models.near
+      const y = heightAt(t.x, t.z) + frame.lift - 0.2
+      world.makeRotationY(t.facing).setPosition(t.x, y, t.z).multiply(scale.makeScale(frame.scale, frame.scale, frame.scale))
+      m.copy(world).multiply(toYaw.makeTranslation(frame.yawPivot.x, frame.yawPivot.y, frame.yawPivot.z)).multiply(turn.makeRotationY(t.yaw))
+        .multiply(yawToPitch.makeTranslation(frame.pitchPivot.x - frame.yawPivot.x, frame.pitchPivot.y - frame.yawPivot.y, frame.pitchPivot.z - frame.yawPivot.z))
+      pivot.setFromMatrixPosition(m)
+      m.multiply(tilt.makeRotationX(t.pitch))
+      muzzle.set(0, 0, models.near.barrel).applyMatrix4(m)
+    }
+    // Standing behind the gun, looking along the barrel over its body
+    eye.set(-Math.sin(heading) * 3.2, 1.45, -Math.cos(heading) * 3.2).add(pivot)
+  }
+
   return {
     group,
     circles,
+    gunnerView,
     turrets: sets.flatMap((s) => s.turrets),
     update(time, camera) {
       for (const set of sets) {

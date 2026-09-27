@@ -69,6 +69,37 @@ function Crosshair() {
   )
 }
 
+const WEAPON_LABEL = { handgun: 'HANDGUN', primary: 'PRIMARY', launcher: 'AA LAUNCHER' } as const
+
+/** Launcher lock-on: a box around the aircraft being tracked, amber while locking, green once locked. */
+function LockOn({ state }: { state: GameState }) {
+  if (state.lock < 0) return null
+  const locked = state.lock >= 1
+  const color = locked ? '#5dff8a' : '#ffc14d'
+  const onScreen = state.lockX >= 0
+  return (
+    <>
+      {onScreen && (
+        <div style={{ position: 'absolute', left: `${state.lockX * 100}%`, top: `${state.lockY * 100}%`, width: 54, height: 54, transform: 'translate(-50%, -50%)', border: `2px solid ${color}`, boxShadow: `0 0 10px ${color}` }} />
+      )}
+      <div style={{ position: 'absolute', left: '50%', top: 'calc(50% + 34px)', transform: 'translateX(-50%)', color, fontSize: 14, fontWeight: 700, textShadow: '0 0 6px #000' }}>
+        {locked ? 'LOCKED — FIRE!' : onScreen ? `LOCKING ${Math.round(state.lock * 100)}%` : 'AIM AT AN ENEMY AIRCRAFT'}
+      </div>
+    </>
+  )
+}
+
+function controlsHint(state: GameState) {
+  if (state.onGun) return 'MACHINE GUN — mouse aim · LMB fire (slow, heavy rounds) · E leave the gun'
+  if (state.vehicle === 'heli') {
+    return state.seat === 0
+      ? 'PILOT — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · E get out (pilots can\'t shoot)'
+      : 'PASSENGER — mouse aim · LMB fire out of the door · F switch weapon · R reload · E get out'
+  }
+  if (state.vehicle === 'car') return 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse look · V view · LMB fire (roof gun view) · E exit'
+  return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · G pick up / drop · E vehicle / machine gun · LMB shoot'
+}
+
 export function Hud() {
   const [state, setState] = useState<GameState | null>(null)
 
@@ -82,6 +113,7 @@ export function Hud() {
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'monospace' }}>
       <style>{FLASH_CSS}</style>
       {!state.dead && <Crosshair />}
+      {!state.dead && <LockOn state={state} />}
       {state.hitsLanded > 0 && <HitMarker key={`hit-${state.hitsLanded}`} />}
       {state.damageTaken > 0 && (
         <div key={`dmg-${state.damageTaken}`} style={{ position: 'absolute', inset: 0, boxShadow: 'inset 0 0 160px 40px rgba(220, 30, 20, 0.9)', animation: 'hud-damage 450ms ease-out forwards' }} />
@@ -135,18 +167,24 @@ export function Hud() {
             />
           </div>
         </div>
-        <div style={{ fontSize: 18, color: '#8fd0ff' }}>
-          {state.reloading ? 'RELOADING…' : `AMMO ${state.ammo} / ${state.maxAmmo}`}
-        </div>
-        {state.vehicle === 'heli' && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}
+        {state.onGun ? (
+          <div style={{ fontSize: 18, color: '#ffb35a' }}>MACHINE GUN</div>
+        ) : state.current ? (
+          <div style={{ fontSize: 18, color: '#8fd0ff' }}>
+            {state.reloading ? 'RELOADING…' : `${WEAPON_LABEL[state.current]}  ${state.ammo} / ${state.reserve}`}
+            {state.current === 'launcher' && <span style={{ fontSize: 13, color: '#b9d4ea' }}>{'  missiles'}</span>}
+          </div>
+        ) : (
+          <div style={{ fontSize: 18, color: '#9fb4c8' }}>NO WEAPON</div>
+        )}
+        {state.weapons.length > 0 && (
+          <div style={{ fontSize: 12, color: '#9fb4c8' }}>
+            [F] {state.weapons.map((w) => <span key={w} style={{ color: w === state.current ? '#eaf6ff' : '#6f8599', fontWeight: w === state.current ? 700 : 400, marginRight: 8 }}>{WEAPON_LABEL[w]}</span>)}
+          </div>
+        )}
+        {state.vehicle === 'heli' && state.seat === 0 && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}
         {state.vehicle === 'car' && <div style={{ fontSize: 16, color: '#ffe08f' }}>{state.speedKmh} km/h</div>}
-        <div style={{ opacity: 0.85 }}>
-          {state.vehicle === 'heli'
-            ? 'HELICOPTER — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · LMB fire (cockpit) · E exit'
-            : state.vehicle === 'car'
-              ? 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse look · V view · LMB fire (gunner) · E exit'
-              : 'WASD move · Shift sprint · Space jump · E vehicle · LMB shoot'}
-        </div>
+        <div style={{ opacity: 0.85 }}>{controlsHint(state)}</div>
       </div>
 
       <div
@@ -168,7 +206,8 @@ export function Hud() {
         <div style={{ opacity: 0.85 }}>
           {state.carryingGem ? `💎 CARRYING ENEMY GEM — bring it to your ${(team ?? 'blue').toUpperCase()} gem!` : 'Steal the enemy gem'}
         </div>
-        {state.nearVehicle && !state.vehicle && <div style={{ color: '#8fd0ff' }}>[E] {state.nearVehicle === 'heli' ? 'Board helicopter' : 'Drive battle car'}</div>}
+        {state.interactPrompt && <div style={{ color: '#8fd0ff' }}>[E] {state.interactPrompt}</div>}
+        {state.pickupPrompt && <div style={{ color: '#b6f0a0' }}>[G] {state.pickupPrompt}</div>}
       </div>
 
       <div

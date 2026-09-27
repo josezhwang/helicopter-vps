@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js'
 import type { Team } from './bases'
 import { createCarriedGem } from './gem'
+import { loadProp, propGroup } from './props'
+import { WEAPON_KINDS, type WeaponKind } from './weapons'
 
 export const TEAM_COLOR: Record<Team, number> = { blue: 0x2e6fbd, red: 0xb03a2e }
 
@@ -11,9 +13,8 @@ const ROBOT_HEIGHT = 2.0
 /** Ground speed (world units/s) at which the robot's run cycle plays at normal speed. */
 const RUN_CYCLE_SPEED = 12
 const MOVING_SPEED = 0.8
-const GUN_URL = '/primary-handgun.glb'
-/** Held pistol, a bit oversized so it reads clearly at a distance. */
-const GUN_LENGTH = 0.55
+/** Held guns are drawn a bit oversized so they read clearly at a distance. */
+const HELD_SCALE: Record<WeaponKind, number> = { handgun: 1.6, primary: 0.6, launcher: 1 }
 const FLASH_MS = 70
 /** Robots further than this skip shadows and animate at a third of the rate (hard to notice at that range). */
 const DETAIL_DISTANCE = 70
@@ -37,44 +38,9 @@ export interface Avatar {
   deathVisible: () => boolean
   /** Show the muzzle flash and return the muzzle's world position for the tracer. */
   fire: () => THREE.Vector3
+  /** The weapon in their hands (null = none). */
+  setWeapon: (kind: WeaponKind | null) => void
   dispose: () => void
-}
-
-interface GunAsset {
-  model: THREE.Object3D
-  /** Barrel tip in the model's local space (barrel points along -Z). */
-  muzzle: THREE.Vector3
-}
-
-let gunAsset: Promise<GunAsset | null> | null = null
-
-/** A separate copy from the first-person viewmodel, whose materials are tuned to draw on top. */
-function loadGun(): Promise<GunAsset | null> {
-  gunAsset ??= new GLTFLoader().loadAsync(GUN_URL).then((gltf) => {
-    const inner = gltf.scene
-    const size = new THREE.Box3().setFromObject(inner).getSize(new THREE.Vector3())
-    inner.scale.setScalar(GUN_LENGTH / (Math.max(size.x, size.y, size.z) || 1))
-    inner.rotation.y = -Math.PI / 2 // same orientation as the viewmodel: barrel along -Z
-    const model = new THREE.Group()
-    model.add(inner)
-    model.updateMatrixWorld(true)
-    const box = new THREE.Box3().setFromObject(model)
-    // Centre the grip area on the origin so the hand holds the middle, barrel pointing forward
-    const center = box.getCenter(new THREE.Vector3())
-    inner.position.sub(center)
-    model.traverse((node) => {
-      const mesh = node as THREE.Mesh
-      if (!mesh.isMesh) return
-      mesh.castShadow = true
-      mesh.raycast = noRaycast
-    })
-    const muzzle = new THREE.Vector3(0, box.max.y - center.y - (box.max.y - box.min.y) * 0.3, box.min.z - center.z)
-    return { model, muzzle }
-  }).catch((error) => {
-    console.error('[avatar] handgun model failed to load:', error)
-    return null
-  })
-  return gunAsset
 }
 
 let flashTexture: THREE.Texture | null = null
@@ -208,24 +174,36 @@ export function createAvatar(name: string, team: Team): Avatar {
   carriedGem.visible = false
   body.add(carriedGem)
 
-  // Held handgun: follows the robot's right hand, points where the player aims
+  // Held weapon: follows the robot's right hand (the launcher rides on the shoulder), points where the player aims
   const gunHolder = new THREE.Group()
   gunHolder.position.set(0.32, 1.25, -0.3)
   body.add(gunHolder)
   const muzzle = new THREE.Object3D()
-  muzzle.position.set(0, 0.05, -GUN_LENGTH / 2)
+  muzzle.position.set(0, 0.05, -0.3)
   gunHolder.add(muzzle)
+  const guns = new Map<WeaponKind, { model: THREE.Object3D; muzzle: THREE.Vector3 }>()
+  let held: WeaponKind | null = 'primary'
+  const showHeld = () => {
+    for (const [kind, gun] of guns) gun.model.visible = kind === held
+    const gun = held ? guns.get(held) : undefined
+    if (gun) muzzle.position.copy(gun.muzzle)
+  }
   const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: muzzleFlashTexture(), color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }))
   flash.scale.setScalar(0.9)
   flash.visible = false
   flash.raycast = noRaycast
   muzzle.add(flash)
   let flashUntil = 0
-  void loadGun().then((asset) => {
-    if (!asset || disposed) return
-    gunHolder.add(asset.model.clone())
-    muzzle.position.copy(asset.muzzle)
-  })
+  for (const kind of WEAPON_KINDS) {
+    void loadProp(kind).then((prop) => {
+      if (disposed) return
+      const model = propGroup(prop)
+      model.scale.setScalar(HELD_SCALE[kind])
+      gunHolder.add(model)
+      guns.set(kind, { model, muzzle: prop.tip.clone().multiplyScalar(HELD_SCALE[kind]) })
+      showHeld()
+    }).catch((error) => console.error(`[avatar] ${kind} model failed to load:`, error))
+  }
 
   const label = nameLabel(name, team)
   label.position.y = 2.75
@@ -330,7 +308,10 @@ export function createAvatar(name: string, team: Team): Avatar {
         run.timeScale = THREE.MathUtils.clamp(speed / RUN_CYCLE_SPEED, 0.6, 1.4)
         mixer.update(step)
       }
-      if (rightHand) {
+      if (held === 'launcher') {
+        // On the right shoulder, pointing where they aim
+        gunHolder.position.set(0.24, 1.68, 0)
+      } else if (rightHand) {
         group.updateMatrixWorld(true)
         rightHand.getWorldPosition(handPos)
         gunHolder.position.copy(body.worldToLocal(handPos))
@@ -358,6 +339,11 @@ export function createAvatar(name: string, team: Team): Avatar {
     deathVisible() {
       if (deathTime < 0) return false
       return (performance.now() - deathStart) / 1000 < DEATH_STUMBLE + DEATH_FALL + DEATH_LIE + DEATH_SINK
+    },
+    setWeapon(kind) {
+      if (kind === held) return
+      held = kind
+      showHeld()
     },
     fire() {
       flash.visible = true

@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { BASE_CENTER, PLATEAU_HALF, type Team } from './layout'
 
 export const WORLD_SIZE = 1000
 export const HALF_WORLD = WORLD_SIZE / 2
@@ -6,13 +7,33 @@ export const HALF_WORLD = WORLD_SIZE / 2
 export const OUR_BASE: THREE.Vector3 = new THREE.Vector3(-380, 0, -380)
 export const ENEMY_BASE: THREE.Vector3 = new THREE.Vector3(380, 0, 380)
 
-/** Analytic battlefield height — shared by terrain mesh, player, and vehicles. */
-export function heightAt(x: number, z: number): number {
+function rawHeight(x: number, z: number): number {
   const hills = Math.sin(x * 0.008) * Math.cos(z * 0.009) * 14
   const dunes = Math.sin(x * 0.02 + z * 0.013) * Math.cos(z * 0.017 - x * 0.011) * 5
   const ridges = Math.cos((x - z) * 0.004) * 8
   const valleys = Math.sin((x + z) * 0.005) * Math.cos((x - z) * 0.007) * 3
   return hills + dunes + ridges + valleys
+}
+
+/** Each base stands on level ground: flat out to PLATEAU_HALF, easing back into the hills over PLATEAU_BLEND. */
+const PLATEAU_BLEND = 30
+const plateaus = (['blue', 'red'] as const).map((team) => ({ team, ...BASE_CENTER[team], h: rawHeight(BASE_CENTER[team].x, BASE_CENTER[team].z) }))
+
+/** Height of the level ground a team's base stands on. */
+export function baseGroundHeight(team: Team): number {
+  return plateaus.find((p) => p.team === team)!.h
+}
+
+/** Analytic battlefield height — shared by terrain mesh, player, and vehicles. */
+export function heightAt(x: number, z: number): number {
+  let h = rawHeight(x, z)
+  for (const p of plateaus) {
+    const d = Math.max(Math.abs(x - p.x), Math.abs(z - p.z))
+    if (d >= PLATEAU_HALF + PLATEAU_BLEND) continue
+    const t = THREE.MathUtils.smoothstep(d, PLATEAU_HALF, PLATEAU_HALF + PLATEAU_BLEND)
+    h = p.h + (h - p.h) * t
+  }
+  return h
 }
 
 export function createTerrain(): THREE.Mesh {

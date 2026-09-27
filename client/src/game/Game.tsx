@@ -15,12 +15,12 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
     resetGameState()
     let game: BattlefieldGame | null = null
     const net: Multiplayer = new Multiplayer(roomId, token, {
-      onWelcome: (you, players, vehicles) => {
+      onWelcome: (you, players, world) => {
         if (game) {
-          game.syncRoster(players, vehicles)
+          game.syncRoster(players, world)
           return
         }
-        game = new BattlefieldGame(mount, { you, players, net, vehicles })
+        game = new BattlefieldGame(mount, { you, players, net, world })
         game.start()
         setReady(true)
       },
@@ -31,8 +31,15 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
       onHp: (id, hp, by) => game?.applyHp(id, hp, by),
       onKilled: (id, by) => game?.playerKilled(id, by),
       onRespawn: (id) => game?.playerRespawned(id),
-      onShot: (id, to) => game?.remoteShot(id, to),
+      onShot: (id, to, weapon) => game?.remoteShot(id, to, weapon),
       onEject: (vehicleId) => game?.ejectFrom(vehicleId),
+      onUngun: (gunId) => game?.ungun(gunId),
+      onItem: (item) => game?.itemChanged(item),
+      onItemGone: (id) => game?.itemGone(id),
+      onTook: (took) => game?.took(took),
+      onMissile: (id, target, from) => game?.remoteMissile(id, target, from),
+      onWrecked: (vehicleId, by, at) => game?.vehicleWrecked(vehicleId, by, at),
+      onRepaired: (vehicleId) => game?.vehicleRepaired(vehicleId),
       onError: (message) => setError(message),
       onConnection: (connected) => setGameState({ connected }),
     })

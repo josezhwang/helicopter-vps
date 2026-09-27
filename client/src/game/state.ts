@@ -1,4 +1,5 @@
 import type { Team } from './world/bases'
+import type { WeaponKind } from './world/weapons'
 
 export type PlayerStatus = 'on foot' | 'flying' | 'driving' | 'carrying gem' | 'dead' | 'offline'
 
@@ -12,13 +13,26 @@ export interface RosterEntry {
 }
 
 export interface GameState {
+  /** Loaded rounds, magazine size and spare rounds of the weapon in hand. */
   ammo: number
   maxAmmo: number
+  reserve: number
   reloading: boolean
-  /** What we are flying/driving, if anything, and what we could board with [E]. */
+  /** Weapons carried, and the one in hand. */
+  weapons: WeaponKind[]
+  current: WeaponKind | null
+  /** What we are flying/driving, if anything, and in which seat (0 = pilot / driver). */
   vehicle: 'heli' | 'car' | null
-  nearVehicle: 'heli' | 'car' | null
-  nearPickupLabel: string
+  seat: number
+  /** Manning a base machine gun. */
+  onGun: boolean
+  /** What [E] and [G] would do right now ('' = nothing in reach). */
+  interactPrompt: string
+  pickupPrompt: string
+  /** Launcher lock-on: -1 when not aiming the launcher, else 0..1 (1 = locked); where the target is on screen (0..1). */
+  lock: number
+  lockX: number
+  lockY: number
   carryingGem: boolean
   score: number
   message: string
@@ -29,7 +43,6 @@ export interface GameState {
   /** Player health — starts at 100. */
   health: number
   weaponName: string
-  weaponPower: number
   /** True once either team steals the other's gem: result screen shows. */
   finished: boolean
   team: Team | null
@@ -45,19 +58,26 @@ export interface GameState {
 type Listener = (s: GameState) => void
 
 const INITIAL_STATE: GameState = {
-  ammo: 12,
-  maxAmmo: 12,
+  ammo: 30,
+  maxAmmo: 30,
+  reserve: 60,
   reloading: false,
+  weapons: ['handgun', 'primary'],
+  current: 'primary',
   vehicle: null,
-  nearVehicle: null,
-  nearPickupLabel: '',
+  seat: 0,
+  onGun: false,
+  interactPrompt: '',
+  pickupPrompt: '',
+  lock: -1,
+  lockX: -1,
+  lockY: -1,
   carryingGem: false,
   score: 0,
   rotorRpm: 0,
   speedKmh: 0,
   health: 100,
-  weaponName: 'Primary Handgun',
-  weaponPower: 5,
+  weaponName: 'Primary Gun',
   finished: false,
   message: 'Connecting to the battle…',
   team: null,

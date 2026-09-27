@@ -1,11 +1,16 @@
 import { API_URL } from '../config'
+import type { ItemKind, NetItem } from './world/items'
 
 export type Team = 'red' | 'blue'
 export type Vec3 = [number, number, number]
 
-/** `id` is `<team>-<heli|car>-<0..4>`; `r` is the rotation (YXZ order); `spin` is rotor RPM or car speed (m/s). */
+/**
+ * `id` is `<team>-<heli|car>-<0..4>`; `seat` 0 flies / drives (helicopters also have passenger seats 1-3);
+ * `r` is the rotation (YXZ order); `spin` is rotor RPM or car speed (m/s). Only seat 0 moves the vehicle.
+ */
 export interface NetVehicle {
   id: string
+  seat: number
   p: Vec3
   r: Vec3
   spin: number
@@ -20,6 +25,12 @@ export interface NetState {
   pitch: number
   /** The vehicle this player is driving or flying; everyone moves it to match. */
   vehicle: NetVehicle | null
+  /** Manning a base machine gun (`<team>-mg-<0..4>`), aimed at yaw / pitch relative to the gun's facing. */
+  gun: { id: string; yaw: number; pitch: number } | null
+  /** Weapon in hand: 0 handgun, 1 primary, 2 launcher, -1 none. */
+  w: number
+  /** Loadout [loaded, spare] per weapon (loaded -1 = not carried): what they drop when they die. */
+  inv: number[]
   /** Carrying the enemy team's gem (named `flag` from before gems replaced flags). */
   flag: boolean
   hp: number
@@ -37,7 +48,7 @@ export interface NetPlayer {
 }
 
 export interface NetHandlers {
-  onWelcome: (you: string, players: NetPlayer[], vehicles: VehiclePoses) => void
+  onWelcome: (you: string, players: NetPlayer[], world: WorldSnapshot) => void
   onPlayer: (player: NetPlayer) => void
   onLeave: (id: string) => void
   onState: (id: string, state: NetState) => void
@@ -45,11 +56,39 @@ export interface NetHandlers {
   onHp: (id: string, hp: number, by: string) => void
   onKilled: (id: string, by: string) => void
   onRespawn: (id: string) => void
-  onShot: (id: string, to: Vec3) => void
-  /** Someone else got into this vehicle first: we have to leave it. */
+  onShot: (id: string, to: Vec3, weapon: string) => void
+  /** Someone else got into this seat first (or it's a wreck): we have to leave it. */
   onEject: (vehicleId: string) => void
+  /** Someone else is already on this machine gun. */
+  onUngun: (gunId: string) => void
+  onItem: (item: NetItem) => void
+  onItemGone: (id: string) => void
+  /** The server's answer to our [G]: what we got (count 0 = nothing). */
+  onTook: (took: Took) => void
+  /** Another player fired an anti-aircraft missile at a helicopter. */
+  onMissile: (id: string, target: string, from: Vec3) => void
+  onWrecked: (vehicleId: string, by: string, at: { p: Vec3; r: Vec3 } | null) => void
+  onRepaired: (vehicleId: string) => void
   onError: (message: string) => void
   onConnection: (connected: boolean) => void
+}
+
+export interface WorldSnapshot {
+  vehicles: VehiclePoses
+  items: NetItem[]
+  wrecks: string[]
+}
+
+export interface Took {
+  id: string
+  kind: ItemKind | null
+  mode: 'weapon' | 'ammo'
+  /** Loaded rounds of a weapon taken whole. */
+  mag: number
+  /** Spare rounds / missiles received. */
+  count: number
+  /** A whole weapon was handed over. */
+  weapon: boolean
 }
 
 const RECONNECT_MS = 2000
@@ -75,7 +114,11 @@ export class Multiplayer {
       switch (message.type) {
         case 'welcome':
           this.handlers.onConnection(true)
-          this.handlers.onWelcome(String(message.you), message.players as NetPlayer[], (message.vehicles ?? {}) as VehiclePoses)
+          this.handlers.onWelcome(String(message.you), message.players as NetPlayer[], {
+            vehicles: (message.vehicles ?? {}) as VehiclePoses,
+            items: (message.items ?? []) as NetItem[],
+            wrecks: (message.wrecks ?? []) as string[],
+          })
           break
         case 'player': this.handlers.onPlayer(message.player as NetPlayer); break
         case 'leave': this.handlers.onLeave(String(message.id)); break
@@ -84,8 +127,15 @@ export class Multiplayer {
         case 'hp': this.handlers.onHp(String(message.id), Number(message.hp), String(message.by)); break
         case 'killed': this.handlers.onKilled(String(message.id), String(message.by)); break
         case 'respawn': this.handlers.onRespawn(String(message.id)); break
-        case 'shot': this.handlers.onShot(String(message.id), message.to as Vec3); break
+        case 'shot': this.handlers.onShot(String(message.id), message.to as Vec3, String(message.w ?? 'primary')); break
         case 'eject': this.handlers.onEject(String(message.vehicle)); break
+        case 'ungun': this.handlers.onUngun(String(message.gun)); break
+        case 'item': this.handlers.onItem(message.item as NetItem); break
+        case 'itemGone': this.handlers.onItemGone(String(message.id)); break
+        case 'took': this.handlers.onTook(message as unknown as Took); break
+        case 'missile': this.handlers.onMissile(String(message.id), String(message.target), message.from as Vec3); break
+        case 'wrecked': this.handlers.onWrecked(String(message.id), String(message.by), (message.at ?? null) as { p: Vec3; r: Vec3 } | null); break
+        case 'repaired': this.handlers.onRepaired(String(message.id)); break
         case 'error':
           this.fatal = true
           this.handlers.onError(String(message.message))
@@ -108,8 +158,20 @@ export class Multiplayer {
     this.send({ type: 'state', s: state })
   }
 
-  sendShot(to: Vec3) {
-    this.send({ type: 'shot', to })
+  sendShot(to: Vec3, weapon: string) {
+    this.send({ type: 'shot', to, w: weapon })
+  }
+
+  sendMissile(target: string) {
+    this.send({ type: 'missile', target })
+  }
+
+  sendTake(id: string, mode: 'weapon' | 'ammo', want: number) {
+    this.send({ type: 'take', id, mode, want })
+  }
+
+  sendDrop(kind: string, mag: number, count: number) {
+    this.send({ type: 'drop', kind, mag, count })
   }
 
   sendHit(target: string, weapon: string) {
