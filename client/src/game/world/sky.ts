@@ -139,7 +139,7 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
   const dome = new THREE.Mesh(
     new THREE.SphereGeometry(1, 64, 32),
     new THREE.ShaderMaterial({
-      uniforms: { map: { value: null }, rotation: { value: rotation }, exposure: { value: 1 }, fallback: { value: horizon.clone() } },
+      uniforms: { map: { value: null }, rotation: { value: rotation }, exposure: { value: 1 }, fallback: { value: horizon.clone() }, sunDirection: { value: SUN_DIRECTION.clone() } },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
         void main() {
@@ -153,6 +153,7 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
         uniform mat3 rotation;
         uniform float exposure;
         uniform vec3 fallback;
+        uniform vec3 sunDirection;
         varying vec3 vDirection;
         ${INVERSE_ACES_GLSL}
         void main() {
@@ -162,7 +163,14 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
             vec3 photo = texture2D(map, uv).rgb;
             gl_FragColor = vec4(inverseACESFilmic(photo, exposure), 1.0);
           #else
-            gl_FragColor = vec4(fallback, 1.0);
+            // Painted sky (the light setting): deep blue overhead fading to the hazy horizon, a warm glow round the sun
+            vec3 dir = normalize(vDirection);
+            float up = clamp(dir.y, 0.0, 1.0);
+            vec3 zenith = inverseACESFilmic(vec3(0.24, 0.42, 0.72), exposure);
+            vec3 sky = mix(fallback, zenith, pow(up, 0.55));
+            float sun = max(dot(dir, sunDirection), 0.0);
+            sky += vec3(1.0, 0.85, 0.6) * (pow(sun, 8.0) * 0.35 + pow(sun, 900.0) * 12.0);
+            gl_FragColor = vec4(sky, 1.0);
           #endif
         }`,
       side: THREE.BackSide,
@@ -178,15 +186,34 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
   scene.add(dome)
   const domeMaterial = dome.material as THREE.ShaderMaterial
 
-  const skyUrl = profile.sky8k ? '/textures/sky_8k.jpg' : '/textures/sky_4k.jpg'
-  textureLoader.load(skyUrl, (sky) => {
-    sky.colorSpace = THREE.SRGBColorSpace
-    sky.anisotropy = 4
-    sky.generateMipmaps = true
-    domeMaterial.uniforms.map.value = sky
-    domeMaterial.defines = { HAS_MAP: '' }
-    domeMaterial.needsUpdate = true
-  })
+  // The sky photo (clouds) is only fetched when the setting shows it; the light setting paints the sky instead
+  let photo: THREE.Texture | null = null
+  let photoUrl = ''
+  const showSky = (p: QualityProfile) => {
+    if (!p.skyPhoto) {
+      domeMaterial.defines = {}
+      domeMaterial.needsUpdate = true
+      return
+    }
+    const url = p.sky8k ? '/textures/sky_8k.jpg' : '/textures/sky_4k.jpg'
+    if (photo && (photoUrl === url || !p.sky8k)) {
+      domeMaterial.defines = { HAS_MAP: '' }
+      domeMaterial.needsUpdate = true
+      return
+    }
+    photoUrl = url
+    textureLoader.load(url, (sky) => {
+      sky.colorSpace = THREE.SRGBColorSpace
+      sky.anisotropy = 4
+      sky.generateMipmaps = true
+      photo?.dispose()
+      photo = sky
+      domeMaterial.uniforms.map.value = sky
+      domeMaterial.defines = { HAS_MAP: '' }
+      domeMaterial.needsUpdate = true
+    })
+  }
+  showSky(profile)
   new HDRLoader().load('/textures/sky_2k.hdr', (hdr) => {
     hdr.mapping = THREE.EquirectangularReflectionMapping
     const pmrem = new THREE.PMREMGenerator(renderer)
@@ -203,6 +230,7 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
   let mode: QualityProfile['sun'] | null = null
   const makeSun = (p: QualityProfile) => {
     if (mode === p.sun && sun) {
+      sun.castShadow = p.shadows
       sun.shadow.mapSize.set(p.shadowMapSize, p.shadowMapSize)
       sun.shadow.map?.dispose()
       sun.shadow.map = null
@@ -219,7 +247,7 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
       // Two cascades fitted to the view: crisp near the player, still there on the far hills
       const light = new SunLight(SUN_COLOR, SUN_INTENSITY)
       light.position.copy(SUN_DIRECTION)
-      light.castShadow = true
+      light.castShadow = p.shadows
       light.shadow.mapSize.set(p.shadowMapSize, p.shadowMapSize)
       light.shadow.camera.near = 0.5
       light.shadow.camera.far = p.shadowDistance
@@ -231,7 +259,7 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
       // One shadow map in a box that follows the player
       const light = new THREE.DirectionalLight(SUN_COLOR, SUN_INTENSITY)
       light.position.copy(SUN_OFFSET)
-      light.castShadow = true
+      light.castShadow = p.shadows
       light.shadow.mapSize.set(p.shadowMapSize, p.shadowMapSize)
       light.shadow.camera.near = 50
       light.shadow.camera.far = 900
@@ -262,7 +290,10 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, pro
       sun.position.set(x + SUN_OFFSET.x, SUN_OFFSET.y, z + SUN_OFFSET.z)
       sun.target.updateMatrixWorld()
     },
-    setProfile: makeSun,
+    setProfile(p) {
+      makeSun(p)
+      showSky(p)
+    },
     update(camera) {
       dome.position.copy(camera.position)
       dome.scale.setScalar(10)

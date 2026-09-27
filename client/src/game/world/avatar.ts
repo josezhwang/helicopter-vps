@@ -16,7 +16,11 @@ const VISOR_COLOR: Record<Team, number> = { blue: 0x3fa4ff, red: 0xff3a24 }
  * run and sprint with the player's speed while the upper body holds the gun up and leans with the aim; it
  * flinches when hit, throws grenades, and falls when it dies. Its eye glows in the team colour.
  */
-const ROBOT_URL = '/models/robot.glb'
+let robotUrl = '/models/robot.glb'
+/** Weak PCs get the lighter robot (a third of the triangles, smaller textures). Set before the first avatar. */
+export function setRobotDetail(lite: boolean) {
+  if (!robotAsset) robotUrl = lite ? '/models/robot_lite.glb' : '/models/robot.glb'
+}
 const ROBOT_HEIGHT = 2.0
 /** Ground speeds (m/s) at which the walk, run and sprint cycles look right. */
 const WALK_CYCLE_SPEED = 1.6
@@ -96,7 +100,7 @@ const boneOf = (track: THREE.KeyframeTrack) => track.name.slice(0, track.name.la
 
 /** Loaded once and shared; every avatar gets its own skeleton clone. */
 function loadRobot(): Promise<RobotAsset | null> {
-  robotAsset ??= new GLTFLoader().loadAsync(ROBOT_URL).then((gltf) => {
+  robotAsset ??= new GLTFLoader().loadAsync(robotUrl).then((gltf) => {
     const byName = new Map(gltf.animations.map((clip) => [clip.name, clip]))
     const need = (name: ClipName) => {
       const clip = byName.get(name)

@@ -24,7 +24,7 @@ import { AMMO, WEAPONS, MACHINE_GUN, CAR_GUN, LOCK_TIME, LOCK_CONE, type RoundKi
 import { createItems, itemLabel, ammoOf, isWeaponItem, type ItemField, type NetItem } from './world/items'
 import { createProjectiles, type Projectiles, type Surface } from './world/projectiles'
 import { createDecals, type Decals } from './world/decals'
-import { createAvatar, muzzleFlashTexture, type Avatar } from './world/avatar'
+import { createAvatar, muzzleFlashTexture, setRobotDetail, type Avatar } from './world/avatar'
 import { gameState, radar, setGameState, type KillEntry, type RadarBlip, type RosterEntry } from './state'
 import type { BlastKind, Multiplayer, NetPlayer, NetState, ProjectileKind, Took, Vec3, WorldSnapshot } from './net'
 
@@ -311,6 +311,7 @@ export class BattlefieldGame {
     setGameState({ quality })
 
     // World
+    setRobotDetail(PROFILES[quality].robotLite)
     this.terrain = createTerrain({ textureSize: PROFILES[quality].terrainTextures, anisotropy: Math.min(PROFILES[quality].anisotropy, this.renderer.capabilities.getMaxAnisotropy()) })
     const worldCircles = this.solidCircles
     this.scene.add(this.terrain)
@@ -368,6 +369,7 @@ export class BattlefieldGame {
     ;(this.terrain.userData.layers as { uGround: { value: THREE.Texture } }).uGround.value = this.groundMap.texture
     this.noGrass = noGrass
     this.plantGrass(PROFILES[quality])
+    this.terrainDetail(PROFILES[quality])
 
     // Supplies (launchers, missile crates, ammo boxes, dropped weapons) and everything that flies
     this.items = createItems()
@@ -983,7 +985,15 @@ export class BattlefieldGame {
     this.graphics.setQuality(quality)
     this.sky.setProfile(PROFILES[quality])
     this.plantGrass(PROFILES[quality])
+    this.terrainDetail(PROFILES[quality])
     setGameState({ quality })
+  }
+
+  /** Light setting: ground photos only close by, one lookup each. */
+  private terrainDetail(profile: QualityProfile) {
+    const layers = this.terrain.userData.layers as { uLite: { value: number }; uDetail: { value: THREE.Vector2 } }
+    layers.uLite.value = profile.terrainLite ? 1 : 0
+    layers.uDetail.value.set(profile.terrainLite ? 12 : 45, profile.terrainLite ? 40 : 170)
   }
 
   /** Blade-by-blade grass round the camera (or, on Low, the lighter grass clumps). */
@@ -997,10 +1007,12 @@ export class BattlefieldGame {
       this.blades = createGrassBlades(profile.grassBlades, profile.grassRadius, this.groundMap.texture)
       this.scene.add(this.blades.mesh)
       if (this.grass) this.grass.group.visible = false
-    } else {
+    } else if (profile.grassClumps) {
       this.grass ??= createGrass(this.noGrass)
       if (!this.grass.group.parent) this.scene.add(this.grass.group)
       this.grass.group.visible = true
+    } else if (this.grass) {
+      this.grass.group.visible = false
     }
   }
 

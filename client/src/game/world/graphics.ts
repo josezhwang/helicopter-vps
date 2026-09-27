@@ -37,25 +37,58 @@ export interface QualityProfile {
   sky8k: boolean
   /** Ground photo resolution. */
   terrainTextures: 2048 | 1024
+  /** Fraction of the screen resolution actually drawn (below 1 on weak PCs; the picture is scaled up). */
+  renderScale: number
+  /** Sun shadows at all. */
+  shadows: boolean
+  /** The photographed sky (clouds); without it a plain painted sky. */
+  skyPhoto: boolean
+  /** Ground photos only right around the player, plain colours beyond (much cheaper to draw). */
+  terrainLite: boolean
+  /** The lighter robot model for the soldiers. */
+  robotLite: boolean
+  /** The simple grass clumps (when there are no grass blades). */
+  grassClumps: boolean
 }
 
 export const PROFILES: Record<Quality, QualityProfile> = {
-  ultra: { pixelRatio: 2, sun: 'cascades', shadowMapSize: 4096, shadowDistance: 600, ao: { mode: 'High', halfRes: false }, bloom: true, godRays: true, smaa: true, grassBlades: 380_000, grassRadius: 64, anisotropy: 16, sky8k: true, terrainTextures: 2048 },
-  high: { pixelRatio: 1.5, sun: 'cascades', shadowMapSize: 2048, shadowDistance: 420, ao: { mode: 'Medium', halfRes: true }, bloom: true, godRays: false, smaa: true, grassBlades: 210_000, grassRadius: 50, anisotropy: 8, sky8k: true, terrainTextures: 2048 },
-  medium: { pixelRatio: 1.25, sun: 'box', shadowMapSize: 2048, shadowDistance: 160, ao: null, bloom: true, godRays: false, smaa: true, grassBlades: 90_000, grassRadius: 36, anisotropy: 4, sky8k: false, terrainTextures: 1024 },
-  low: { pixelRatio: 1, sun: 'box', shadowMapSize: 1024, shadowDistance: 160, ao: null, bloom: false, godRays: false, smaa: false, grassBlades: 0, grassRadius: 0, anisotropy: 2, sky8k: false, terrainTextures: 1024 },
+  ultra: { pixelRatio: 2, sun: 'cascades', shadowMapSize: 4096, shadowDistance: 600, ao: { mode: 'High', halfRes: false }, bloom: true, godRays: true, smaa: true, grassBlades: 380_000, grassRadius: 64, anisotropy: 16, sky8k: true, terrainTextures: 2048, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: false, grassClumps: false },
+  high: { pixelRatio: 1.5, sun: 'cascades', shadowMapSize: 2048, shadowDistance: 420, ao: { mode: 'Medium', halfRes: true }, bloom: true, godRays: false, smaa: true, grassBlades: 210_000, grassRadius: 50, anisotropy: 8, sky8k: true, terrainTextures: 2048, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: false, grassClumps: false },
+  medium: { pixelRatio: 1.25, sun: 'box', shadowMapSize: 2048, shadowDistance: 160, ao: null, bloom: true, godRays: false, smaa: true, grassBlades: 90_000, grassRadius: 36, anisotropy: 4, sky8k: false, terrainTextures: 1024, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: true, grassClumps: false },
+  low: { pixelRatio: 1, sun: 'box', shadowMapSize: 1024, shadowDistance: 160, ao: null, bloom: false, godRays: false, smaa: false, grassBlades: 0, grassRadius: 0, anisotropy: 2, sky8k: false, terrainTextures: 1024, renderScale: 0.75, shadows: false, skyPhoto: false, terrainLite: true, robotLite: true, grassClumps: false },
 }
 
 const STORAGE_KEY = 'aerium_quality'
+
+/**
+ * A first guess for this PC: Low on software rendering (no graphics card) and Intel graphics, Medium on other
+ * built-in graphics or few CPU cores, Ultra on a real graphics card.
+ */
+export function detectQuality(): Quality {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2')
+    if (!gl) return 'low'
+    const info = gl.getExtension('WEBGL_debug_renderer_info')
+    const gpu = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER))
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
+    if (/swiftshader|llvmpipe|software|basic render|microsoft basic/i.test(gpu)) return 'low'
+    if (/intel/i.test(gpu) && !/\barc\b/i.test(gpu)) return 'low'
+    if (/radeon\(tm\) graphics|vega \d|mali|adreno|powervr/i.test(gpu)) return 'medium'
+    if ((navigator.hardwareConcurrency || 8) <= 4) return 'medium'
+  } catch {
+    return 'medium'
+  }
+  return 'ultra'
+}
 
 export function loadQuality(): Quality {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (saved && (QUALITIES as string[]).includes(saved)) return saved as Quality
   } catch {
-    // Storage blocked: fall through to the default
+    // Storage blocked: fall through to the guess
   }
-  return 'ultra'
+  return detectQuality()
 }
 
 export function saveQuality(quality: Quality) {
@@ -117,7 +150,7 @@ export class Graphics {
     this.ao = null
     const p = this.profile
     const renderer = this.renderer
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, p.pixelRatio))
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, p.pixelRatio) * p.renderScale)
     renderer.toneMappingExposure = EXPOSURE
     if (this.quality === 'low') {
       renderer.toneMapping = THREE.ACESFilmicToneMapping

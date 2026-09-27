@@ -208,39 +208,6 @@ export function createBushes(circles?: Array<{ x: number; z: number; r: number }
   return group
 }
 
-export function createClouds(): THREE.Group {
-  const group = new THREE.Group()
-  const rng = mulberry32(31337)
-  const cloudMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 1,
-    transparent: true,
-    opacity: 0.92,
-    flatShading: true,
-  })
-  const geo = new THREE.IcosahedronGeometry(1, 1)
-  const puffs: THREE.Matrix4[] = []
-
-  for (let i = 0; i < 26; i++) {
-    const count = 3 + Math.floor(rng() * 4)
-    const local: THREE.Matrix4[] = []
-    for (let p = 0; p < count; p++) {
-      const px = (rng() * 2 - 1) * 14
-      const py = (rng() * 2 - 1) * 3
-      const pz = (rng() * 2 - 1) * 8
-      const sx = 8 + rng() * 14
-      const sy = 4 + rng() * 6
-      const sz = 7 + rng() * 12
-      local.push(compose(px, py, pz, new THREE.Euler(), sx, sy, sz))
-    }
-    const cloud = new THREE.Matrix4().makeTranslation((rng() * 2 - 1) * 700, 130 + rng() * 70, (rng() * 2 - 1) * 700)
-    for (const m of local) puffs.push(cloud.clone().multiply(m))
-  }
-
-  group.add(instanced(geo, cloudMat, puffs, false))
-  return group
-}
-
 const GRASS_URL = '/models/grass.glb'
 /** Grass is purely visual: drawn only near the camera, in square chunks so off-screen/far ones are skipped. */
 const GRASS_CHUNK = 64

@@ -131,6 +131,9 @@ export function createTerrain(options: TerrainOptions): THREE.Mesh {
     uRough: { value: LAYER_ROUGHNESS },
     uTint: { value: LAYER_TINT.map((t) => new THREE.Vector3(...t)) },
     /** Each layer's average colour (linear), used far away where the photo's detail would only shimmer. */
+    /** Light setting: photos only close by (distance where they start / finish fading), one lookup each. */
+    uDetail: { value: new THREE.Vector2(45, 170) },
+    uLite: { value: 0 },
     uAvg: { value: LAYER_AVERAGE.map((c) => new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace)) },
     /** Dirt / meadow / grass map (see groundMap.ts); plain grass until it's set. */
     uGround: { value: new THREE.DataTexture(new Uint8Array([0, 0, 255, 255]), 1, 1) as THREE.Texture },
@@ -152,6 +155,8 @@ uniform float uRough[${n}];
 uniform vec3 uTint[${n}];
 uniform sampler2D uGround;
 uniform vec3 uAvg[${n}];
+uniform vec2 uDetail;
+uniform float uLite;
 varying vec3 vGroundPos;
 varying vec3 vGroundNormal;
 float gHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -168,6 +173,11 @@ void sampleLayer(float layer, vec2 uv, float k, out vec4 albedo, out vec4 nh) {
   float i = floor(l), f = fract(l);
   vec2 offA = sin(vec2(3.0, 7.0) * i) * 0.5 + 0.5;
   vec2 offB = sin(vec2(3.0, 7.0) * (i + 1.0)) * 0.5 + 0.5;
+  if (uLite > 0.5) {
+    albedo = texture(tAlbedo, vec3(uv, layer));
+    nh = texture(tNormalHeight, vec3(uv, layer));
+    return;
+  }
   vec4 a1 = textureGrad(tAlbedo, vec3(uv + offA, layer), dx, dy);
   vec4 a2 = textureGrad(tAlbedo, vec3(uv + offB, layer), dx, dy);
   vec4 n1 = textureGrad(tNormalHeight, vec3(uv + offA, layer), dx, dy);
@@ -196,7 +206,7 @@ float gw[${n}];
 gw[0] = wGrass; gw[1] = wMeadow; gw[2] = wDirt; gw[3] = wRock; gw[4] = wSand;
 float tileNoise = gNoise(gp * 0.021);
 // Far away the photos only shimmer and show their repeats: fade to each surface's own average colour
-float gFar = smoothstep(45.0, 170.0, length(vGroundPos - cameraPosition));
+float gFar = smoothstep(uDetail.x, uDetail.y, length(vGroundPos - cameraPosition));
 vec4 gAlb[${n}];
 vec4 gNh[${n}];
 float gTop = -1.0;
@@ -211,7 +221,7 @@ for (int i = 0; i < ${n}; i++) {
   sampleLayer(float(i), gp * uScale[i], tileNoise, gAlb[i], gNh[i]);
   gAlb[i].rgb = mix(gAlb[i].rgb, uAvg[i], gFar);
   gNh[i] = mix(gNh[i], vec4(0.5, 0.5, 0.5, 1.0), gFar);
-  if (i == 3 && gN.y < 0.85) {
+  if (i == 3 && gN.y < 0.85 && uLite < 0.5) {
     // Cliffs: the rock photographed from the side, so its strata run across the slope
     vec4 sa, sn;
     vec2 side = abs(gN.x) > abs(gN.z) ? vGroundPos.zy : vGroundPos.xy;
