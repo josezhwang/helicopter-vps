@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { subscribeGameState, type GameState, type RosterEntry } from '../state'
+import { WEAPONS } from '../world/weapons'
 
 const TEAM_CSS = { red: '#ff7a6e', blue: '#7fb6ff' } as const
 const panel = {
@@ -69,7 +70,17 @@ function Crosshair() {
   )
 }
 
-const WEAPON_LABEL = { handgun: 'HANDGUN', primary: 'PRIMARY', launcher: 'AA LAUNCHER' } as const
+/** Sniper scope: black all round a clear circle, with fine cross hairs. */
+function Scope() {
+  return (
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+      <div style={{ position: 'absolute', left: '50%', top: '50%', width: '72vmin', height: '72vmin', transform: 'translate(-50%, -50%)', borderRadius: '50%', boxShadow: '0 0 0 200vmax #000', border: '3px solid #111' }} />
+      <div style={{ position: 'absolute', left: '50%', top: '14vmin', bottom: '14vmin', width: 1, background: 'rgba(0,0,0,0.85)' }} />
+      <div style={{ position: 'absolute', top: '50%', left: 'calc(50% - 36vmin)', width: '72vmin', height: 1, background: 'rgba(0,0,0,0.85)' }} />
+      <div style={{ position: 'absolute', left: '50%', top: '50%', width: 6, height: 6, transform: 'translate(-50%, -50%)', borderRadius: '50%', background: '#ff3b30' }} />
+    </div>
+  )
+}
 
 /** Launcher lock-on: a box around the aircraft being tracked, amber while locking, green once locked. */
 function LockOn({ state }: { state: GameState }) {
@@ -96,8 +107,8 @@ function controlsHint(state: GameState) {
       ? 'PILOT — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · E get out (pilots can\'t shoot)'
       : 'PASSENGER — mouse aim · LMB fire out of the door · F switch weapon · R reload · E get out'
   }
-  if (state.vehicle === 'car') return 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse look · V view · LMB fire (roof gun view) · E exit'
-  return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · G pick up / drop · E vehicle / machine gun · LMB shoot'
+  if (state.vehicle === 'car') return 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse aims the roof gatling · LMB fire · V view · E exit'
+  return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · G pick up / drop · E vehicle / machine gun · LMB shoot · RMB aim'
 }
 
 export function Hud() {
@@ -112,7 +123,8 @@ export function Hud() {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', fontFamily: 'monospace' }}>
       <style>{FLASH_CSS}</style>
-      {!state.dead && <Crosshair />}
+      {state.scoped && !state.dead && <Scope />}
+      {!state.dead && !state.scoped && <Crosshair />}
       {!state.dead && <LockOn state={state} />}
       {state.hitsLanded > 0 && <HitMarker key={`hit-${state.hitsLanded}`} />}
       {state.damageTaken > 0 && (
@@ -169,9 +181,11 @@ export function Hud() {
         </div>
         {state.onGun ? (
           <div style={{ fontSize: 18, color: '#ffb35a' }}>MACHINE GUN</div>
+        ) : state.carGun ? (
+          <div style={{ fontSize: 18, color: '#ffb35a' }}>ROOF GATLING</div>
         ) : state.current ? (
           <div style={{ fontSize: 18, color: '#8fd0ff' }}>
-            {state.reloading ? 'RELOADING…' : `${WEAPON_LABEL[state.current]}  ${state.ammo} / ${state.reserve}`}
+            {state.reloading ? 'RELOADING…' : `${WEAPONS[state.current].name.toUpperCase()}  ${state.ammo} / ${state.reserve}`}
             {state.current === 'launcher' && <span style={{ fontSize: 13, color: '#b9d4ea' }}>{'  missiles'}</span>}
           </div>
         ) : (
@@ -179,7 +193,7 @@ export function Hud() {
         )}
         {state.weapons.length > 0 && (
           <div style={{ fontSize: 12, color: '#9fb4c8' }}>
-            [F] {state.weapons.map((w) => <span key={w} style={{ color: w === state.current ? '#eaf6ff' : '#6f8599', fontWeight: w === state.current ? 700 : 400, marginRight: 8 }}>{WEAPON_LABEL[w]}</span>)}
+            [F] {state.weapons.map((w) => <span key={w} style={{ color: w === state.current ? '#eaf6ff' : '#6f8599', fontWeight: w === state.current ? 700 : 400, marginRight: 8 }}>{WEAPONS[w].name.toUpperCase()}</span>)}
           </div>
         )}
         {state.vehicle === 'heli' && state.seat === 0 && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}

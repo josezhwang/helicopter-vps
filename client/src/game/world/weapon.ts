@@ -1,23 +1,31 @@
 import * as THREE from 'three'
-import { WEAPONS, WEAPON_KINDS, type WeaponDef, type WeaponKind } from './weapons'
+import { AMMO, AMMO_TYPES, SLOTS, WEAPONS, type AmmoType, type Slot, type WeaponDef, type WeaponKind } from './weapons'
 
 export interface Shot {
   /** Where the round left (just in front of the camera) and where it stopped. */
   start: THREE.Vector3
   end: THREE.Vector3
-  /** What it hit first (null = open air). */
+  /** What it hit first (null = open air), and the hit details for marks and dust. */
   object: THREE.Object3D | null
+  hit: THREE.Intersection | null
+  dir: THREE.Vector3
   kind: WeaponKind
 }
 
+/** Loadout on the wire: one [kind, loaded rounds] per slot (null = empty) and spare rounds per ammo type. */
+export interface Loadout {
+  s: Array<[WeaponKind, number] | null>
+  r: Partial<Record<AmmoType, number>>
+}
+
 /**
- * What a player carries: up to one weapon of each kind with its loaded magazine, plus spare rounds per
- * ammo type (the launcher's spare rounds are missiles). Handles switching, reloading and hitscan fire.
+ * What a player carries: one weapon per slot (sidearm, long gun, launcher) with its loaded magazine, and
+ * spare rounds per ammo type. Handles switching, reloading and hitscan fire.
  */
 export class Arsenal {
-  slots: Partial<Record<WeaponKind, { mag: number }>> = {}
-  reserve: Record<WeaponKind, number> = { handgun: 0, primary: 0, launcher: 0 }
-  current: WeaponKind | null = null
+  slots: Partial<Record<Slot, { kind: WeaponKind; mag: number }>> = {}
+  reserve = {} as Record<AmmoType, number>
+  current: Slot | null = null
   reloading = false
   private reloadTimer = 0
   private cooldown = 0
@@ -26,7 +34,7 @@ export class Arsenal {
   private flashLight: THREE.PointLight
   private flashTimer = 0
 
-  constructor(scene: THREE.Scene, private camera: THREE.PerspectiveCamera, private onShoot?: () => void) {
+  constructor(scene: THREE.Scene, private camera: THREE.PerspectiveCamera, private onShoot?: (def: WeaponDef) => void) {
     this.flashLight = new THREE.PointLight(0xffc873, 0, 18)
     scene.add(this.flashLight)
     this.reset()
@@ -34,14 +42,29 @@ export class Arsenal {
 
   /** The starting loadout: handgun and primary gun, each with three magazines. */
   reset() {
-    this.slots = { handgun: { mag: WEAPONS.handgun.magSize }, primary: { mag: WEAPONS.primary.magSize } }
-    this.reserve = { handgun: WEAPONS.handgun.maxReserve, primary: WEAPONS.primary.maxReserve, launcher: 0 }
-    this.current = 'primary'
+    this.slots = { sidearm: { kind: 'handgun', mag: WEAPONS.handgun.magSize }, long: { kind: 'primary', mag: WEAPONS.primary.magSize } }
+    this.reserve = Object.fromEntries(AMMO_TYPES.map((a) => [a, 0])) as Record<AmmoType, number>
+    this.reserve['9mm'] = WEAPONS.handgun.magSize * 2
+    this.reserve['556'] = WEAPONS.primary.magSize * 2
+    this.current = 'long'
     this.cancelReload()
   }
 
+  /** Nothing at all (dead: it was all left on the ground). */
+  clear() {
+    this.slots = {}
+    this.reserve = Object.fromEntries(AMMO_TYPES.map((a) => [a, 0])) as Record<AmmoType, number>
+    this.current = null
+    this.cancelReload()
+  }
+
+  get kind(): WeaponKind | null {
+    return this.current ? this.slots[this.current]?.kind ?? null : null
+  }
+
   get def(): WeaponDef | null {
-    return this.current ? WEAPONS[this.current] : null
+    const kind = this.kind
+    return kind ? WEAPONS[kind] : null
   }
 
   get mag(): number {
@@ -52,60 +75,71 @@ export class Arsenal {
     return this.shotsFired
   }
 
+  carried(): WeaponKind[] {
+    return SLOTS.map((s) => this.slots[s]?.kind).filter((k): k is WeaponKind => !!k)
+  }
+
   has(kind: WeaponKind) {
-    return !!this.slots[kind]
+    return this.slots[WEAPONS[kind].slot]?.kind === kind
+  }
+
+  /** What is in the slot a weapon would go into. */
+  inSlotOf(kind: WeaponKind) {
+    return this.slots[WEAPONS[kind].slot] ?? null
   }
 
   /** Spare rounds (or missiles) that still fit. */
-  space(kind: WeaponKind) {
-    return Math.max(0, WEAPONS[kind].maxReserve - this.reserve[kind])
+  space(ammo: AmmoType) {
+    return Math.max(0, AMMO[ammo].max - this.reserve[ammo])
   }
 
-  addReserve(kind: WeaponKind, rounds: number) {
-    const added = Math.min(this.space(kind), Math.max(0, rounds))
-    this.reserve[kind] += added
+  addReserve(ammo: AmmoType, rounds: number) {
+    const added = Math.min(this.space(ammo), Math.max(0, rounds))
+    this.reserve[ammo] += added
     return added
   }
 
-  /** Pick up a weapon we don't have yet, with whatever its magazine holds; switches to it. */
+  /** Take a weapon into its (empty) slot with whatever its magazine holds, and switch to it. */
   give(kind: WeaponKind, mag: number) {
-    this.slots[kind] = { mag: THREE.MathUtils.clamp(Math.round(mag), 0, WEAPONS[kind].magSize) }
-    this.select(kind)
+    const slot = WEAPONS[kind].slot
+    this.slots[slot] = { kind, mag: THREE.MathUtils.clamp(Math.round(mag), 0, WEAPONS[kind].magSize) }
+    this.select(slot)
   }
 
-  /** Put a weapon down: returns its loaded rounds and all spare rounds for it, and switches to the next one. */
-  remove(kind: WeaponKind): { mag: number; spare: number } | null {
-    const slot = this.slots[kind]
-    if (!slot) return null
-    delete this.slots[kind]
-    const spare = this.reserve[kind]
-    this.reserve[kind] = 0
-    if (this.current === kind) {
-      this.current = WEAPON_KINDS.find((k) => this.slots[k]) ?? null
+  /** Put a weapon down: its loaded rounds and the spare rounds only it uses go with it; switches to the next one. */
+  remove(slot: Slot): { kind: WeaponKind; mag: number; spare: number } | null {
+    const held = this.slots[slot]
+    if (!held) return null
+    delete this.slots[slot]
+    const ammo = WEAPONS[held.kind].ammo
+    const shared = SLOTS.some((s) => this.slots[s] && WEAPONS[this.slots[s]!.kind].ammo === ammo)
+    const spare = shared ? 0 : this.reserve[ammo]
+    if (!shared) this.reserve[ammo] = 0
+    if (this.current === slot) {
+      this.current = SLOTS.find((s) => this.slots[s]) ?? null
       this.cancelReload()
     }
-    return { mag: slot.mag, spare }
+    return { kind: held.kind, mag: held.mag, spare }
   }
 
-  select(kind: WeaponKind) {
-    if (!this.slots[kind] || this.current === kind) return
-    this.current = kind
+  select(slot: Slot) {
+    if (!this.slots[slot] || this.current === slot) return
+    this.current = slot
     this.cancelReload()
-    this.cooldown = Math.max(this.cooldown, 0.25)
+    this.cooldown = Math.max(this.cooldown, 0.3)
   }
 
   /** [F]: the next weapon we carry. */
   switchNext() {
-    const owned = WEAPON_KINDS.filter((k) => this.slots[k])
+    const owned = SLOTS.filter((s) => this.slots[s])
     if (owned.length < 2) return
-    const next = owned[(owned.indexOf(this.current ?? owned[0]) + 1) % owned.length]
-    this.select(next)
+    this.select(owned[(owned.indexOf(this.current ?? owned[0]) + 1) % owned.length])
   }
 
   reload() {
     const def = this.def
-    const slot = this.current ? this.slots[this.current] : undefined
-    if (!def || !slot || this.reloading || slot.mag >= def.magSize || this.reserve[def.kind] <= 0) return
+    const held = this.current ? this.slots[this.current] : undefined
+    if (!def || !held || this.reloading || held.mag >= def.magSize || this.reserve[def.ammo] <= 0) return
     this.reloading = true
     this.reloadTimer = def.reloadTime
   }
@@ -123,11 +157,11 @@ export class Arsenal {
     if (!this.reloading) return
     this.reloadTimer -= dt
     const def = this.def
-    const slot = this.current ? this.slots[this.current] : undefined
-    if (this.reloadTimer > 0 || !def || !slot) return
-    const moved = Math.min(def.magSize - slot.mag, this.reserve[def.kind])
-    slot.mag += moved
-    this.reserve[def.kind] -= moved
+    const held = this.current ? this.slots[this.current] : undefined
+    if (this.reloadTimer > 0 || !def || !held) return
+    const moved = Math.min(def.magSize - held.mag, this.reserve[def.ammo])
+    held.mag += moved
+    this.reserve[def.ammo] -= moved
     this.reloading = false
   }
 
@@ -140,44 +174,45 @@ export class Arsenal {
     return def.automatic ? shooting : pressed
   }
 
-  /** Handgun / primary gun hitscan: the nearest thing along the (slightly spread) aim line takes the round. */
-  tryFire(input: { shooting: boolean }, targets: THREE.Object3D[]): Shot | null {
+  /** Hitscan: the nearest thing along the (slightly spread) aim line takes the round. `steady` narrows the spread (aiming). */
+  tryFire(input: { shooting: boolean }, targets: THREE.Object3D[], steady = 1): Shot | null {
     const def = this.def
-    if (!this.trigger(input.shooting) || !def || def.kind === 'launcher') return null
-    const slot = this.slots[def.kind]!
-    if (slot.mag <= 0) {
+    if (!this.trigger(input.shooting) || !def || def.slot === 'launcher') return null
+    const held = this.slots[def.slot]!
+    if (held.mag <= 0) {
       this.reload()
       return null
     }
     this.cooldown = def.fireRate
-    slot.mag--
+    held.mag--
     this.shotsFired++
-    this.onShoot?.()
+    this.onShoot?.(def)
 
     const origin = this.camera.getWorldPosition(new THREE.Vector3())
     const dir = this.camera.getWorldDirection(new THREE.Vector3())
-    if (def.spread > 0) dir.add(new THREE.Vector3((Math.random() - 0.5) * def.spread, (Math.random() - 0.5) * def.spread, (Math.random() - 0.5) * def.spread)).normalize()
+    const spread = def.spread * steady
+    if (spread > 0) dir.add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread)).normalize()
     this.flash(origin, dir)
     const hits = new THREE.Raycaster(origin, dir, 0.5, def.range).intersectObjects(targets, true)
     const end = hits.length > 0 ? hits[0].point.clone() : origin.clone().addScaledVector(dir, def.range)
-    if (slot.mag === 0) this.reload()
-    return { start: origin.clone().addScaledVector(dir, 1.2), end, object: hits[0]?.object ?? null, kind: def.kind }
+    if (held.mag === 0) this.reload()
+    return { start: origin.clone().addScaledVector(dir, 1.2), end, object: hits[0]?.object ?? null, hit: hits[0] ?? null, dir, kind: def.kind }
   }
 
   /** Launcher: true (and one missile used) when a loaded launcher is fired. */
   fireMissile(shooting: boolean): boolean {
     if (this.current !== 'launcher' || !this.trigger(shooting)) return false
-    const slot = this.slots.launcher!
-    if (slot.mag <= 0) {
+    const held = this.slots.launcher!
+    if (held.mag <= 0) {
       this.reload()
       return false
     }
-    slot.mag--
+    held.mag--
     this.cooldown = WEAPONS.launcher.fireRate
     this.shotsFired++
-    this.onShoot?.()
+    this.onShoot?.(WEAPONS.launcher)
     this.flash(this.camera.getWorldPosition(new THREE.Vector3()), this.camera.getWorldDirection(new THREE.Vector3()))
-    if (this.reserve.launcher > 0) this.reload()
+    if (this.reserve.missile > 0) this.reload()
     return true
   }
 
@@ -192,8 +227,10 @@ export class Arsenal {
     this.flashTimer = 0.06
   }
 
-  /** Compact loadout for the network (dropped as pickups where we die): [loaded, spare] per kind, loaded = -1 if not carried. */
-  snapshot(): number[] {
-    return WEAPON_KINDS.flatMap((k) => [this.slots[k]?.mag ?? -1, this.reserve[k]])
+  /** For the network: what we would leave on the ground if we died. */
+  snapshot(): Loadout {
+    const r: Partial<Record<AmmoType, number>> = {}
+    for (const a of AMMO_TYPES) if (this.reserve[a] > 0) r[a] = this.reserve[a]
+    return { s: SLOTS.map((s) => (this.slots[s] ? [this.slots[s]!.kind, this.slots[s]!.mag] : null)), r }
   }
 }

@@ -4,7 +4,7 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js'
 import type { Team } from './bases'
 import { createCarriedGem } from './gem'
 import { loadProp, propGroup } from './props'
-import { WEAPON_KINDS, type WeaponKind } from './weapons'
+import { WEAPONS, type WeaponKind } from './weapons'
 
 export const TEAM_COLOR: Record<Team, number> = { blue: 0x2e6fbd, red: 0xb03a2e }
 
@@ -14,7 +14,9 @@ const ROBOT_HEIGHT = 2.0
 const RUN_CYCLE_SPEED = 12
 const MOVING_SPEED = 0.8
 /** Held guns are drawn a bit oversized so they read clearly at a distance. */
-const HELD_SCALE: Record<WeaponKind, number> = { handgun: 1.6, primary: 0.6, launcher: 1 }
+const HELD_SCALE: Partial<Record<WeaponKind, number>> = { handgun: 1.6, launcher: 1 }
+/** Long guns are held at 60% of their real length (the soldier model is small for its 2m height). */
+const LONG_GUN_SCALE = 0.6
 const FLASH_MS = 70
 /** Robots further than this skip shadows and animate at a third of the rate (hard to notice at that range). */
 const DETAIL_DISTANCE = 70
@@ -44,7 +46,7 @@ export interface Avatar {
 }
 
 let flashTexture: THREE.Texture | null = null
-function muzzleFlashTexture(): THREE.Texture {
+export function muzzleFlashTexture(): THREE.Texture {
   if (flashTexture) return flashTexture
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = 64
@@ -194,16 +196,22 @@ export function createAvatar(name: string, team: Team): Avatar {
   flash.raycast = noRaycast
   muzzle.add(flash)
   let flashUntil = 0
-  for (const kind of WEAPON_KINDS) {
-    void loadProp(kind).then((prop) => {
+  const loading = new Set<WeaponKind>()
+  /** Guns are loaded the first time this soldier holds them. */
+  const loadGun = (kind: WeaponKind) => {
+    if (loading.has(kind)) return
+    loading.add(kind)
+    void loadProp(WEAPONS[kind].model).then((prop) => {
       if (disposed) return
+      const scale = HELD_SCALE[kind] ?? LONG_GUN_SCALE
       const model = propGroup(prop)
-      model.scale.setScalar(HELD_SCALE[kind])
+      model.scale.setScalar(scale)
       gunHolder.add(model)
-      guns.set(kind, { model, muzzle: prop.tip.clone().multiplyScalar(HELD_SCALE[kind]) })
+      guns.set(kind, { model, muzzle: prop.tip.clone().multiplyScalar(scale) })
       showHeld()
     }).catch((error) => console.error(`[avatar] ${kind} model failed to load:`, error))
   }
+  loadGun('primary')
 
   const label = nameLabel(name, team)
   label.position.y = 2.75
@@ -343,6 +351,7 @@ export function createAvatar(name: string, team: Team): Avatar {
     setWeapon(kind) {
       if (kind === held) return
       held = kind
+      if (kind) loadGun(kind)
       showHeld()
     },
     fire() {

@@ -22,6 +22,8 @@ const CAR_URL = '/models/battle_car.glb'
 const CAR_FAR_URL = '/models/battle_car_far.glb'
 const WHEEL_URL = '/models/battle_car_wheel.glb'
 const WHEEL_FAR_URL = '/models/battle_car_wheel_far.glb'
+const TURRET_URL = '/models/battle_car_turret.glb'
+const GATLING_URL = '/models/battle_car_gatling.glb'
 
 /** MD-500 model units → metres: about 10.4m nose to tail, 9.2m rotor. */
 const HELI_SCALE = 1.25
@@ -45,6 +47,15 @@ export const CAR_TRACK = 2.7 * CAR_SCALE
 export const CAR_CIRCLE_RADIUS = 1.85
 export const CAR_CIRCLE_OFFSET = 1.45
 export const HELI_BODY_RADIUS = 3
+/**
+ * The car's roof gun (metres, car space): the dome turns about a vertical axis through YAW_PIVOT, the gatling
+ * tilts about GATLING_PIVOT (on its own axis, which it also spins around), muzzle at GATLING_MUZZLE.
+ */
+export const TURRET_PIVOT = new THREE.Vector3(0, 0, -1.5925 * CAR_SCALE)
+export const GATLING_PIVOT = new THREE.Vector3(0, 3.892 * CAR_SCALE, -0.473 * CAR_SCALE)
+const GATLING_MUZZLE = new THREE.Vector3(0, 3.892 * CAR_SCALE, 1.239 * CAR_SCALE)
+/** How high / low the gatling can point (radians). */
+export const CAR_GUN_PITCH = { up: 0.55, down: 0.18 }
 
 /**
  * Helicopter seats (eye positions, in the model's own units before scaling): pilot front on the +X side,
@@ -90,6 +101,11 @@ export interface Vehicle {
   doorHold: number[]
   /** Where it was parked at the start of the match. */
   home: { x: number; y: number; z: number; yaw: number }
+  /** Car roof gun: turn and tilt relative to the car, recoil (1 → 0 after a shot), gatling barrel spin. */
+  aimYaw: number
+  aimPitch: number
+  gunRecoil: number
+  gatlingSpin: number
   rotorAngle: number
   tailAngle: number
   wheelAngle: number
@@ -120,6 +136,10 @@ export interface Fleet {
   circles: (skip?: Vehicle | null) => Array<{ x: number; z: number; r: number }>
   /** Put a vehicle back on its home spot, parked and whole. */
   sendHome: (v: Vehicle) => void
+  /** Where a car's gatling muzzle is right now (world space). */
+  carMuzzle: (v: Vehicle, out: THREE.Vector3) => THREE.Vector3
+  /** Where a ray really meets a vehicle's body (for bullet holes), world space; null if it misses the model. */
+  surfaceHit: (v: Vehicle, origin: THREE.Vector3, dir: THREE.Vector3, far: number) => { point: THREE.Vector3; normal: THREE.Vector3 } | null
   update: (dt: number, camera: THREE.Vector3, localDriver: Vehicle | null) => void
 }
 
@@ -272,6 +292,7 @@ export function createFleet(): Fleet {
       spin: 0, targetSpin: 0, steer: 0, occupants: Array(seats).fill(null), destroyed: false,
       doors: Array(seats).fill(0), doorHold: Array(seats).fill(0),
       home: { x: spot.x, y, z: spot.z, yaw: spot.yaw },
+      aimYaw: 0, aimPitch: 0, gunRecoil: 0, gatlingSpin: 0,
       rotorAngle: spot.index * 0.7, tailAngle: 0, wheelAngle: 0, lastYaw: spot.yaw,
     }
     vehicles.push(vehicle)
@@ -307,6 +328,7 @@ export function createFleet(): Fleet {
     v.steer = 0
     v.destroyed = false
     v.lastYaw = v.home.yaw
+    v.aimYaw = v.aimPitch = v.gunRecoil = 0
   }
 
   // ---- Rendering (filled in once the models load) ----
@@ -316,6 +338,10 @@ export function createFleet(): Fleet {
     rotorHub: THREE.Vector3; rotorAxis: THREE.Vector3; tailHub: THREE.Vector3; tailAxis: THREE.Vector3
   }
   interface CarLevel { body: THREE.InstancedMesh[]; wheels: THREE.InstancedMesh[] }
+  let carGun: { turret: THREE.InstancedMesh[]; gatling: THREE.InstancedMesh[] } | null = null
+  /** Plain (not drawn) meshes of each vehicle kind's body, to find where rounds meet it. */
+  const surfaces: Record<VehicleKind, THREE.Mesh[]> = { heli: [], car: [] }
+  const surfaceMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
   let heliModel: HeliModel | null = null
   let carNear: CarLevel | null = null
   let carFar: CarLevel | null = null
@@ -392,6 +418,7 @@ export function createFleet(): Fleet {
       // The back edge swings outwards: +X doors turn negative, -X doors positive
       return { meshes: pieces.map((p) => makeInstanced(p, capacity, false, group)), hinge, swing: i % 2 === 0 ? -DOOR_OPEN : DOOR_OPEN }
     })
+    surfaces.heli = groups.static.filter((p) => !p.material.transparent).map((p) => new THREE.Mesh(p.geometry, surfaceMaterial))
     heliModel = {
       statics: groups.static.map((p) => makeInstanced(p, capacity, true, group)),
       rotor: groups.rotor.map((p) => makeInstanced(p, capacity, true, group)),
@@ -434,6 +461,7 @@ export function createFleet(): Fleet {
   }
   void loadCar(CAR_URL, WHEEL_URL, true).then((level) => {
     carNear = level
+    surfaces.car = level.body.map((mesh) => new THREE.Mesh(mesh.geometry, surfaceMaterial))
     // Fit the hitbox to the body
     const bounds = new THREE.Box3()
     for (const mesh of level.body) { mesh.geometry.computeBoundingBox(); bounds.union(mesh.geometry.boundingBox!) }
@@ -446,6 +474,12 @@ export function createFleet(): Fleet {
   }).catch((error) => console.error('[vehicles] battle car model failed to load:', error))
   void loadCar(CAR_FAR_URL, WHEEL_FAR_URL, false).then((level) => { carFar = level })
     .catch((error) => console.warn('[vehicles] distant battle car unavailable, using full detail:', error))
+  void Promise.all([loadModel(TURRET_URL), loadModel(GATLING_URL)]).then(([turret, gatling]) => {
+    carGun = {
+      turret: bakePieces(turret.scene, CAR_SCALE, sharedMaterial()).map((p) => makeInstanced(p, cars.length, true, group)),
+      gatling: bakePieces(gatling.scene, CAR_SCALE, sharedMaterial()).map((p) => makeInstanced(p, cars.length, true, group)),
+    }
+  }).catch((error) => console.error('[vehicles] battle car gun failed to load:', error))
 
   // ---- Per-frame ----
   const m = new THREE.Matrix4(), part = new THREE.Matrix4(), spinM = new THREE.Matrix4(), toHub = new THREE.Matrix4(), fromHub = new THREE.Matrix4()
@@ -462,6 +496,35 @@ export function createFleet(): Fleet {
   }
   const spinAbout = (hub: THREE.Vector3, axis: THREE.Vector3, angle: number) =>
     part.copy(toHub.makeTranslation(hub.x, hub.y, hub.z)).multiply(spinM.makeRotationAxis(axis, angle)).multiply(fromHub.makeTranslation(-hub.x, -hub.y, -hub.z))
+  const zAxis = new THREE.Vector3(0, 0, 1)
+  /** Car-space matrices of the roof dome and the gatling for the gun's current aim. */
+  const gunMatrices = (v: Vehicle, turret: THREE.Matrix4, gatling: THREE.Matrix4) => {
+    turret.makeTranslation(TURRET_PIVOT.x, TURRET_PIVOT.y, TURRET_PIVOT.z).multiply(spinM.makeRotationY(v.aimYaw)).multiply(fromHub.makeTranslation(-TURRET_PIVOT.x, -TURRET_PIVOT.y, -TURRET_PIVOT.z))
+    const kick = v.gunRecoil * v.gunRecoil * 0.14
+    gatling.copy(turret).multiply(toHub.makeTranslation(GATLING_PIVOT.x, GATLING_PIVOT.y, GATLING_PIVOT.z))
+      .multiply(spinM.makeRotationX(-v.aimPitch)).multiply(new THREE.Matrix4().makeTranslation(0, 0, -kick))
+      .multiply(new THREE.Matrix4().makeRotationAxis(zAxis, v.gatlingSpin)).multiply(fromHub.makeTranslation(-GATLING_PIVOT.x, -GATLING_PIVOT.y, -GATLING_PIVOT.z))
+  }
+  const turretM = new THREE.Matrix4(), gatlingM = new THREE.Matrix4()
+  const carMuzzle = (v: Vehicle, out: THREE.Vector3) => {
+    v.object.updateMatrix()
+    gunMatrices(v, turretM, gatlingM)
+    return out.copy(GATLING_MUZZLE).applyMatrix4(gatlingM).applyMatrix4(v.object.matrix)
+  }
+  const surfaceRay = new THREE.Raycaster()
+  const surfaceHit = (v: Vehicle, origin: THREE.Vector3, dir: THREE.Vector3, far: number) => {
+    v.object.updateMatrixWorld()
+    surfaceRay.set(origin, dir)
+    surfaceRay.far = far
+    let best: THREE.Intersection | null = null
+    for (const mesh of surfaces[v.kind]) {
+      mesh.matrixWorld.copy(v.object.matrixWorld)
+      const hit = surfaceRay.intersectObject(mesh, false)[0]
+      if (hit && (!best || hit.distance < best.distance)) best = hit
+    }
+    if (!best?.face) return null
+    return { point: best.point.clone(), normal: best.face.normal.clone().transformDirection(v.object.matrixWorld) }
+  }
 
   const update = (dt: number, camera: THREE.Vector3, localDriver: Vehicle | null) => {
     const now = performance.now()
@@ -486,6 +549,9 @@ export function createFleet(): Fleet {
           v.steer = THREE.MathUtils.lerp(v.steer, THREE.MathUtils.clamp(steer, -0.6, 0.6), Math.min(1, 8 * dt))
         }
         v.wheelAngle = (v.wheelAngle + (v.spin * dt) / CAR_WHEEL_RADIUS) % (Math.PI * 2)
+        // The gatling keeps spinning for a moment after the last shot
+        v.gatlingSpin = (v.gatlingSpin + v.gunRecoil * 30 * dt) % (Math.PI * 2)
+        v.gunRecoil = Math.max(0, v.gunRecoil - dt * 6)
       }
       v.lastYaw = v.object.rotation.y
     }
@@ -531,6 +597,18 @@ export function createFleet(): Fleet {
           setInstances(level.wheels, slot * WHEELS.length + i, part.multiplyMatrices(m, wheelLocal), tint)
         })
       }
+      if (carGun) {
+        let n = 0
+        for (const v of cars) {
+          if (v.object.position.distanceToSquared(camera) > VISIBLE_DISTANCE ** 2) continue
+          gunMatrices(v, turretM, gatlingM)
+          const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
+          setInstances(carGun.turret, n, part.multiplyMatrices(v.object.matrix, turretM), tint)
+          setInstances(carGun.gatling, n, part.multiplyMatrices(v.object.matrix, gatlingM), tint)
+          n++
+        }
+        finish([...carGun.turret, ...carGun.gatling], n)
+      }
       finish([...near.body], nearCount)
       finish([...near.wheels], nearCount * WHEELS.length)
       if (far !== near) {
@@ -540,5 +618,5 @@ export function createFleet(): Fleet {
     }
   }
 
-  return { group, hitGroup, vehicles, byId, heliSeats, restHeight, clearance, circles, sendHome, update }
+  return { group, hitGroup, vehicles, byId, heliSeats, restHeight, clearance, circles, sendHome, carMuzzle, surfaceHit, update }
 }

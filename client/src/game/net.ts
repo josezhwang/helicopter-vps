@@ -1,5 +1,7 @@
 import { API_URL } from '../config'
 import type { ItemKind, NetItem } from './world/items'
+import type { Loadout } from './world/weapon'
+import type { WeaponKind } from './world/weapons'
 
 export type Team = 'red' | 'blue'
 export type Vec3 = [number, number, number]
@@ -14,6 +16,8 @@ export interface NetVehicle {
   p: Vec3
   r: Vec3
   spin: number
+  /** Battle car roof gun aim: yaw and pitch relative to the car. */
+  aim?: [number, number]
 }
 
 /** Where each vehicle was last left, keyed by id (sent on joining so parked vehicles show up in the right place). */
@@ -27,10 +31,10 @@ export interface NetState {
   vehicle: NetVehicle | null
   /** Manning a base machine gun (`<team>-mg-<0..4>`), aimed at yaw / pitch relative to the gun's facing. */
   gun: { id: string; yaw: number; pitch: number } | null
-  /** Weapon in hand: 0 handgun, 1 primary, 2 launcher, -1 none. */
-  w: number
-  /** Loadout [loaded, spare] per weapon (loaded -1 = not carried): what they drop when they die. */
-  inv: number[]
+  /** Weapon in hand ('' = none). */
+  w: WeaponKind | ''
+  /** What they carry (dropped where they die). */
+  inv: Loadout
   /** Carrying the enemy team's gem (named `flag` from before gems replaced flags). */
   flag: boolean
   hp: number

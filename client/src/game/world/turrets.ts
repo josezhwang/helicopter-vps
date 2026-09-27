@@ -45,6 +45,8 @@ export interface Turret extends TurretPlacement {
   idle: boolean
   /** Player manning it (null = free). */
   occupant: string | null
+  /** 1 right after a shot, easing back to 0: the gun slides back on its mount and returns. */
+  recoil: number
 }
 
 interface Frame {
@@ -214,7 +216,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
   group.name = 'turrets'
   const circles: TurretField['circles'] = []
   const sets = bases.map((base) => {
-    const turrets: Turret[] = base.placements.map((pl) => ({ ...pl, yaw: 0, pitch: 0, idle: true, occupant: null }))
+    const turrets: Turret[] = base.placements.map((pl) => ({ ...pl, yaw: 0, pitch: 0, idle: true, occupant: null, recoil: 0 }))
     for (const t of turrets) circles.push({ x: t.x, z: t.z, r: TURRET_BLOCK_RADIUS })
     const setGroup = new THREE.Group()
     group.add(setGroup)
@@ -230,6 +232,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
   const scale = new THREE.Matrix4()
   const toYaw = new THREE.Matrix4()
   const yawToPitch = new THREE.Matrix4()
+  const kickBack = new THREE.Matrix4()
   /** Write every gun of a set into the near or far instanced meshes, depending on its distance. */
   function writeMatrices(set: (typeof sets)[number], camera: THREE.Vector3 | null) {
     if (!models) return
@@ -245,11 +248,14 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
       const y = heightAt(t.x, t.z) + frame.lift - 0.2
       world.makeRotationY(t.facing).setPosition(t.x, y, t.z).multiply(scale)
       turn.makeRotationY(t.yaw)
-      tilt.makeRotationX(t.pitch)
+      // Recoil: the gun jumps back and its muzzle climbs a little, then it eases home
+      const kick = t.recoil * t.recoil
+      tilt.makeRotationX(t.pitch - kick * 0.06)
+      kickBack.makeTranslation(0, 0, (-kick * 0.35) / frame.scale)
       for (const part of PARTS) {
         if (part === 'base') m.copy(world)
         else if (part === 'yaw') m.copy(world).multiply(toYaw).multiply(turn)
-        else m.copy(world).multiply(toYaw).multiply(turn).multiply(yawToPitch).multiply(tilt)
+        else m.copy(world).multiply(toYaw).multiply(turn).multiply(yawToPitch).multiply(tilt).multiply(kickBack)
         for (const mesh of set.meshes[lod][part]) mesh.setMatrixAt(slot, m)
       }
     }
@@ -289,6 +295,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
   })
 
   const pivot = new THREE.Vector3()
+  let lastTime = 0
   const gunnerView = (t: Turret, eye: THREE.Vector3, muzzle: THREE.Vector3) => {
     const heading = t.facing + t.yaw
     const dir = new THREE.Vector3(Math.sin(heading) * Math.cos(t.pitch), -Math.sin(t.pitch), Math.cos(heading) * Math.cos(t.pitch))
@@ -315,7 +322,10 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
     gunnerView,
     turrets: sets.flatMap((s) => s.turrets),
     update(time, camera) {
+      const dt = lastTime ? Math.min(0.5, time - lastTime) : 0
+      lastTime = time
       for (const set of sets) {
+        for (const t of set.turrets) t.recoil = Math.max(0, t.recoil - dt * 3.2)
         const near = Math.hypot(camera.x - set.center.x, camera.z - set.center.z) < VISIBLE_DISTANCE
         set.group.visible = near
         if (!near || !models) continue

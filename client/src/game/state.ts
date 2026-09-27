@@ -29,6 +29,10 @@ export interface GameState {
   /** What [E] and [G] would do right now ('' = nothing in reach). */
   interactPrompt: string
   pickupPrompt: string
+  /** Looking through a sniper scope. */
+  scoped: boolean
+  /** Driving a battle car: the roof gatling is ours to fire. */
+  carGun: boolean
   /** Launcher lock-on: -1 when not aiming the launcher, else 0..1 (1 = locked); where the target is on screen (0..1). */
   lock: number
   lockX: number
@@ -69,6 +73,8 @@ const INITIAL_STATE: GameState = {
   onGun: false,
   interactPrompt: '',
   pickupPrompt: '',
+  scoped: false,
+  carGun: false,
   lock: -1,
   lockX: -1,
   lockY: -1,

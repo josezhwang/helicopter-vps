@@ -44,7 +44,11 @@ export const LAYOUT = {
   launcherRack: { x0: 3, dx: 2, z: -2, count: 10 },
   /** Missile crates (4 missiles each), two rows of five. */
   missileCrates: [...row(5, 4, 4, 5), ...row(5, 4, 4, 9)],
-  /** Ammo boxes in the fenced gate lane behind the spawn: primary-gun rounds left, handgun rounds right. */
+  /** The gun table beside the helicopter row: two of every long gun, lying across it. */
+  gunTable: { x: 20, z0: -40, dz: 2, count: 14 },
+  /** Ammo for the table's guns, in a row beside it. */
+  ammoRow: { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762', 'sniper', 'sniper', 'plasma', 'plasma'] as const },
+  /** Ammo boxes in the fenced gate lane behind the spawn: primary-gun (5.56) rounds left, handgun (9mm) rounds right. */
   primaryAmmo: [[-8, 42], [-8, 44.5], [-8, 47]] as Spot[],
   handgunAmmo: [[8, 42], [8, 44.5], [8, 47]] as Spot[],
 }

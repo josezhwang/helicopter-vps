@@ -4,7 +4,7 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import { AuthService } from './auth.service'
 import { RoomService, Team } from './room.service'
-import { GEM_PEDESTAL, MACHINE_GUN_SPOTS, WEAPON_ITEMS, initialItems, type Item, type ItemKind } from './game-layout'
+import { AMMO, AMMO_TYPES, GEM_PEDESTAL, MACHINE_GUN_SPOTS, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type WeaponKind } from './game-layout'
 
 type Vec3 = [number, number, number]
 
@@ -15,6 +15,8 @@ interface VehicleState {
   p: Vec3
   r: Vec3
   spin: number
+  /** Battle car roof gun aim (yaw, pitch relative to the car). */
+  aim?: [number, number]
 }
 
 interface PlayerState {
@@ -24,10 +26,10 @@ interface PlayerState {
   vehicle: VehicleState | null
   /** Manning a base machine gun. */
   gun: { id: string; yaw: number; pitch: number } | null
-  /** Weapon in hand: 0 handgun, 1 primary, 2 launcher, -1 none. */
-  w: number
-  /** Loadout, [loaded, spare] per weapon (loaded -1 = not carried) — dropped where the player dies. */
-  inv: number[]
+  /** Weapon in hand ('' = none). */
+  w: WeaponKind | ''
+  /** Loadout — dropped where the player dies: [kind, loaded rounds] per slot, spare rounds per ammo type. */
+  inv: { s: Array<[WeaponKind, number] | null>; r: Partial<Record<AmmoType, number>> }
   flag: boolean
   hp: number
 }
@@ -74,14 +76,12 @@ const MAX_HP = 100
 const RESPAWN_MS = 5000
 // Mirrors client/src/game/world/weapons.ts; the server never trusts client-sent damage
 const WEAPONS: Record<string, { power: number; fireRate: number; range: number }> = {
-  handgun: { power: 15, fireRate: 0.28, range: 160 },
-  primary: { power: 9, fireRate: 0.1, range: 260 },
+  ...Object.fromEntries(Object.entries(ARMS).filter(([kind]) => kind !== 'launcher').map(([kind, w]) => [kind, { power: w.power, fireRate: w.fireRate, range: w.range }])),
   'machine-gun': { power: 45, fireRate: 0.7, range: 450 },
+  'car-gun': { power: 14, fireRate: 0.1, range: 350 },
 }
-const WEAPON_KINDS = ['handgun', 'primary', 'launcher'] as const
-const MAG_SIZE = { handgun: 7, primary: 30, launcher: 1 }
-const MAX_SPARE = { handgun: 14, primary: 60, launcher: 4 }
-const MIN_FIRE_RATE = 0.1
+const EMPTY_LOADOUT = (): PlayerState['inv'] => ({ s: [null, null, null], r: {} })
+const MIN_FIRE_RATE = 0.07
 // Positions are up to one network tick stale on each side
 const RANGE_SLACK = 25
 const FIRE_RATE_SLACK = 0.6
@@ -129,6 +129,10 @@ function parseState(raw: unknown): PlayerState | null {
     const spin = num(v.spin, -100, 100)
     if (!id || seat === null || seat >= SEATS[id.includes('-heli-') ? 'heli' : 'car'] || !vp || !r || spin === null) return null
     vehicle = { id, seat, p: vp, r, spin }
+    if (Array.isArray(v.aim) && v.aim.length === 2) {
+      const aimYaw = num(v.aim[0], -10, 10), aimPitch = num(v.aim[1], -2, 2)
+      if (aimYaw !== null && aimPitch !== null) vehicle.aim = [aimYaw, aimPitch]
+    }
   }
   let gun: PlayerState['gun'] = null
   if (s.gun && typeof s.gun === 'object') {
@@ -138,9 +142,27 @@ function parseState(raw: unknown): PlayerState | null {
     if (typeof g.id !== 'string' || !GUN_ID.test(g.id) || gunYaw === null || gunPitch === null) return null
     gun = { id: g.id, yaw: gunYaw, pitch: gunPitch }
   }
-  const w = int(s.w ?? -1, -1, 2) ?? -1
-  const inv = Array.isArray(s.inv) && s.inv.length === 6 ? s.inv.map((n, i) => int(n, i % 2 === 0 ? -1 : 0, 60) ?? 0) : [-1, 0, -1, 0, -1, 0]
-  return { p, yaw, pitch, vehicle, gun, w, inv, flag: s.flag === true, hp }
+  const w = typeof s.w === 'string' && isWeaponItem(s.w) ? s.w : ''
+  return { p, yaw, pitch, vehicle, gun, w, inv: parseLoadout(s.inv), flag: s.flag === true, hp }
+}
+
+/** Only real weapons in their own slots, magazines and spare rounds within limits. */
+function parseLoadout(raw: unknown): PlayerState['inv'] {
+  const inv = EMPTY_LOADOUT()
+  if (!raw || typeof raw !== 'object') return inv
+  const o = raw as { s?: unknown; r?: unknown }
+  const slots = ['sidearm', 'long', 'launcher']
+  if (Array.isArray(o.s)) o.s.slice(0, 3).forEach((entry, i) => {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !isWeaponItem(entry[0])) return
+    const kind = entry[0]
+    if (ARMS[kind].slot !== slots[i]) return
+    inv.s[i] = [kind, int(entry[1], 0, ARMS[kind].mag) ?? 0]
+  })
+  if (o.r && typeof o.r === 'object') for (const a of AMMO_TYPES) {
+    const n = int((o.r as Record<string, unknown>)[a], 0, AMMO[a].max)
+    if (n) inv.r[a] = n
+  }
+  return inv
 }
 
 @Injectable()
@@ -371,8 +393,11 @@ export class RealtimeService implements OnModuleDestroy {
     const weapon = WEAPONS[weaponId]
     const target = typeof message.target === 'string' ? this.rooms.get(roomId)?.get(message.target) : undefined
     if (!weapon || !target || target.team === shooter.team || !shooter.state || !target.state) return
-    // The machine gun only hits from behind a machine gun, and hand weapons not from one
-    if ((weaponId === 'machine-gun') !== !!shooter.state.gun) return
+    // The machine gun only hits from behind a machine gun, the car gun from a car's driver seat,
+    // hand weapons from neither (nor from a helicopter's pilot seat)
+    const v = shooter.state.vehicle
+    const driving = v?.seat === 0
+    if (weaponId === 'machine-gun' ? !shooter.state.gun : weaponId === 'car-gun' ? !(driving && v!.id.includes('-car-')) : shooter.state.gun || driving) return
     const shooterVitals = this.vitalsOf(roomId, shooter.userId)
     const targetVitals = this.vitalsOf(roomId, target.userId)
     if (shooterVitals.dead || targetVitals.dead) return
@@ -399,16 +424,20 @@ export class RealtimeService implements OnModuleDestroy {
     this.broadcast(roomId, { type: 'killed', id: target.userId, by })
     const state = target.state
     if (state) {
+      // Each weapon with the spare rounds it uses; any other spare rounds as loose ammo
       const where = state.vehicle?.p ?? state.p
-      WEAPON_KINDS.forEach((kind, i) => {
-        const mag = state.inv[i * 2], spare = state.inv[i * 2 + 1]
-        if (mag >= 0) this.addDropped(roomId, kind, where, mag, spare)
-        else if (kind === 'launcher' && spare > 0) this.addDropped(roomId, 'missiles', where, 0, spare)
-      })
+      const spare = { ...state.inv.r }
+      for (const held of state.inv.s) {
+        if (!held) continue
+        const ammo = ARMS[held[0]].ammo
+        this.addDropped(roomId, held[0], where, held[1], spare[ammo] ?? 0)
+        delete spare[ammo]
+      }
+      for (const [ammo, n] of Object.entries(spare)) if (n) this.addDropped(roomId, `ammo-${ammo as AmmoType}`, where, 0, n)
       state.flag = false
       state.vehicle = null
       state.gun = null
-      state.inv = [-1, 0, -1, 0, -1, 0]
+      state.inv = EMPTY_LOADOUT()
     }
     vitals.respawnTimer = setTimeout(() => {
       vitals.hp = MAX_HP
@@ -483,23 +512,24 @@ export class RealtimeService implements OnModuleDestroy {
   private take(roomId: string, conn: Connection, message: Record<string, unknown>) {
     const world = this.worldOf(roomId)
     const item = typeof message.id === 'string' ? world.items.get(message.id) : undefined
-    const want = int(message.want, 0, 120) ?? 0
+    const want = int(message.want, 0, 300) ?? 0
     const mode = message.mode === 'weapon' ? 'weapon' : 'ammo'
     const state = conn.state
     const refuse = () => this.send(conn.ws, { type: 'took', id: message.id, kind: item?.kind ?? null, mode, mag: 0, count: 0, weapon: false })
     if (!item || item.gone || !state || state.vehicle || state.gun || this.vitalsOf(roomId, conn.userId).dead || dist2([item.x, item.z], state.p) > TAKE_REACH) return refuse()
 
     if (mode === 'weapon') {
-      if (!WEAPON_ITEMS.includes(item.kind)) return refuse()
+      if (!isWeaponItem(item.kind)) return refuse()
       const count = Math.min(item.count, want)
       this.send(conn.ws, { type: 'took', id: item.id, kind: item.kind, mode, mag: item.mag, count, weapon: true })
       if (item.fixed) {
-        // A rack launcher comes back a minute later (empty: missiles come from the crates)
+        // A rack launcher / table gun comes back a minute later (launchers empty: missiles come from the crates)
         item.gone = true
         this.itemUpdate(roomId, item)
+        const kind = item.kind
         this.later(roomId, RACK_RESPAWN_MS, () => {
           item.gone = false
-          item.mag = 0
+          item.mag = kind === 'launcher' ? 0 : ARMS[kind].mag
           item.count = 0
           this.itemUpdate(roomId, item)
         })
@@ -509,7 +539,7 @@ export class RealtimeService implements OnModuleDestroy {
       return
     }
 
-    const isWeapon = WEAPON_ITEMS.includes(item.kind)
+    const isWeapon = isWeaponItem(item.kind)
     const available = item.count + (isWeapon ? item.mag : 0)
     const give = Math.min(want, available)
     if (give <= 0) return refuse()
@@ -521,17 +551,17 @@ export class RealtimeService implements OnModuleDestroy {
     else this.itemUpdate(roomId, item)
   }
 
-  /** [G] with nothing in reach: put the weapon in hand down (with its rounds) for anyone to pick up. */
+  /** [G] with nothing in reach (or swapping long guns): put a weapon down (with its rounds) for anyone to pick up. */
   private drop(roomId: string, conn: Connection, message: Record<string, unknown>) {
-    const kind = typeof message.kind === 'string' && (WEAPON_KINDS as readonly string[]).includes(message.kind) ? (message.kind as (typeof WEAPON_KINDS)[number]) : null
+    const kind = typeof message.kind === 'string' && isWeaponItem(message.kind) ? message.kind : null
     const vitals = this.vitalsOf(roomId, conn.userId)
     const state = conn.state
     if (!kind || !state || vitals.dead || state.vehicle || state.gun) return
     const now = Date.now()
-    if (now - vitals.lastDropAt < 300) return
+    if (now - vitals.lastDropAt < 150) return
     vitals.lastDropAt = now
-    const mag = int(message.mag, 0, MAG_SIZE[kind]) ?? 0
-    const count = int(message.count, 0, MAX_SPARE[kind]) ?? 0
+    const mag = int(message.mag, 0, ARMS[kind].mag) ?? 0
+    const count = int(message.count, 0, AMMO[ARMS[kind].ammo].max) ?? 0
     this.addDropped(roomId, kind, state.p, mag, count)
   }
 

@@ -2,14 +2,15 @@ import * as THREE from 'three'
 import { heightAt } from './terrain'
 import { loadProp, propInstances, type Prop, type PropName } from './props'
 import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
-import type { WeaponKind } from './weapons'
+import { AMMO, WEAPONS, WEAPON_KINDS, type AmmoType, type WeaponKind } from './weapons'
 
 /**
- * Things lying around that anyone (either team) can take with [G]: anti-aircraft launchers on each base's
- * rack, missile crates (4 missiles each), ammo boxes, and weapons players dropped or left where they died.
- * The server owns the list and the counts; this draws it and finds what is in reach.
+ * Things lying around that anyone (either team) can take with [G]: long guns on each base's gun table,
+ * anti-aircraft launchers on its rack, missile crates (4 missiles each), ammo boxes, and weapons players
+ * dropped or left where they died. The server owns the list and the counts; this draws it and finds what is
+ * in reach.
  */
-export type ItemKind = WeaponKind | 'missiles' | 'ammo-primary' | 'ammo-handgun'
+export type ItemKind = WeaponKind | `ammo-${AmmoType}`
 
 export interface NetItem {
   id: string
@@ -22,37 +23,35 @@ export interface NetItem {
   count: number
   /** A weapon's loaded magazine. */
   mag: number
-  /** Part of a base's stock (on the rack / crate / box spot) rather than dropped by a player. */
+  /** Part of a base's stock (on the rack / table / crate / box spot) rather than dropped by a player. */
   fixed: boolean
-  /** Taken from the rack and not back yet. */
+  /** Taken from the rack / table and not back yet. */
   gone?: boolean
 }
 
-export const ITEM_LABEL: Record<ItemKind, string> = {
-  handgun: 'handgun',
-  primary: 'primary gun',
-  launcher: 'AA launcher',
-  missiles: 'AA missiles',
-  'ammo-primary': 'primary gun ammo',
-  'ammo-handgun': 'handgun ammo',
-}
+export const isWeaponItem = (kind: ItemKind): kind is WeaponKind => (WEAPON_KINDS as string[]).includes(kind)
+/** Which spare rounds an item holds. */
+export const ammoOf = (kind: ItemKind): AmmoType => (isWeaponItem(kind) ? WEAPONS[kind].ammo : (kind.slice(5) as AmmoType))
 
-/** Which weapon's spare rounds an item holds. */
-export const AMMO_OF: Record<ItemKind, WeaponKind> = {
-  handgun: 'handgun', primary: 'primary', launcher: 'launcher', missiles: 'launcher', 'ammo-primary': 'primary', 'ammo-handgun': 'handgun',
+export function itemLabel(kind: ItemKind): string {
+  if (isWeaponItem(kind)) return WEAPONS[kind].name
+  return AMMO[ammoOf(kind)].name
 }
 
 const RACK_TOP = 0.9
 /** Reach for [G]: horizontal distance from the player. */
 export const ITEM_REACH = 2.4
 
-type Visual = 'launcher' | 'handgun' | 'primary' | 'missile' | 'missile_crate' | 'ammo_556' | 'ammo_9mm'
-const PROP_OF: Record<Visual, PropName> = {
-  launcher: 'launcher', handgun: 'handgun', primary: 'primary', missile: 'missile', missile_crate: 'missile_crate', ammo_556: 'ammo_556', ammo_9mm: 'ammo_9mm',
-}
-const CAPACITY: Record<Visual, number> = { launcher: 90, handgun: 70, primary: 70, missile: 120, missile_crate: 20, ammo_556: 16, ammo_9mm: 16 }
-/** Items further than this aren't drawn (small things, lost in the distance). */
+type Visual = PropName
+const CAPACITY: Partial<Record<Visual, number>> = { launcher: 90, handgun: 70, primary: 70, missile: 120, missile_crate: 20, ammo_556: 60, ammo_9mm: 24 }
+/** Supplies further than this aren't drawn (small things, lost in the distance); guns closer still. */
 const DRAW_DISTANCE = 220
+const GUN_DRAW_DISTANCE = 90
+/** Ammo boxes per type: 9mm has its own box, the rest share the 5.56 box in different sizes. */
+const BOX: Record<AmmoType, { visual: Visual; scale: number }> = {
+  '9mm': { visual: 'ammo_9mm', scale: 1 }, '556': { visual: 'ammo_556', scale: 1 }, '762': { visual: 'ammo_556', scale: 1.4 },
+  sniper: { visual: 'ammo_556', scale: 0.8 }, plasma: { visual: 'ammo_556', scale: 1.1 }, missile: { visual: 'missile_crate', scale: 1 },
+}
 
 export interface ItemField {
   group: THREE.Group
@@ -68,6 +67,20 @@ export interface ItemField {
   update: (camera: THREE.Vector3) => void
 }
 
+/** A plain table: a top and six legs, `length` along its local X. */
+function tableParts(length: number, depth: number): THREE.BufferGeometry[] {
+  const parts: THREE.BufferGeometry[] = []
+  const top = new THREE.BoxGeometry(length, 0.08, depth)
+  top.translate(0, RACK_TOP - 0.04, 0)
+  parts.push(top)
+  for (const x of [-length / 2 + 0.2, 0, length / 2 - 0.2]) for (const z of [-depth / 2 + 0.1, depth / 2 - 0.1]) {
+    const leg = new THREE.BoxGeometry(0.1, RACK_TOP, 0.1)
+    leg.translate(x, RACK_TOP / 2, z)
+    parts.push(leg)
+  }
+  return parts
+}
+
 export function createItems(): ItemField {
   const group = new THREE.Group()
   group.name = 'items'
@@ -76,97 +89,88 @@ export function createItems(): ItemField {
   let dirty = true
   let lastCamera = new THREE.Vector3(Infinity, 0, Infinity)
 
-  // The launcher racks: a long table in front of each warehouse
+  // Each base's launcher rack (in front of the warehouse) and gun table (beside the helicopters)
   const wood = new THREE.MeshStandardMaterial({ color: 0x6b5236, roughness: 0.9 })
-  const rack = LAYOUT.launcherRack
-  const rackLength = (rack.count - 1) * rack.dx + 1.6
-  const rackParts: THREE.BufferGeometry[] = []
-  const top = new THREE.BoxGeometry(rackLength, 0.08, 1.9)
-  top.translate(0, RACK_TOP - 0.04, 0)
-  rackParts.push(top)
-  for (const x of [-rackLength / 2 + 0.2, 0, rackLength / 2 - 0.2]) for (const z of [-0.8, 0.8]) {
-    const leg = new THREE.BoxGeometry(0.1, RACK_TOP, 0.1)
-    leg.translate(x, RACK_TOP / 2, z)
-    rackParts.push(leg)
-  }
+  const rack = LAYOUT.launcherRack, table = LAYOUT.gunTable
+  const tables = [
+    { parts: tableParts((rack.count - 1) * rack.dx + 1.6, 1.9), center: [rack.x0 + ((rack.count - 1) * rack.dx) / 2, rack.z] as const, turn: 0 },
+    { parts: tableParts((table.count - 1) * table.dz + 1.6, 1.6), center: [table.x, table.z0 + ((table.count - 1) * table.dz) / 2] as const, turn: Math.PI / 2 },
+  ]
   for (const team of ['blue', 'red'] as Team[]) {
-    const mid = rack.x0 + ((rack.count - 1) * rack.dx) / 2
-    const at = baseToWorld(team, mid, rack.z)
-    for (const part of rackParts) {
-      const mesh = new THREE.Mesh(part, wood)
-      mesh.position.set(at.x, heightAt(at.x, at.z), at.z)
-      mesh.rotation.y = baseYaw(team, 0)
-      mesh.castShadow = true
-      mesh.receiveShadow = true
-      mesh.raycast = () => {}
-      group.add(mesh)
+    for (const t of tables) {
+      const at = baseToWorld(team, t.center[0], t.center[1])
+      for (const part of t.parts) {
+        const mesh = new THREE.Mesh(part, wood)
+        mesh.position.set(at.x, heightAt(at.x, at.z), at.z)
+        mesh.rotation.y = baseYaw(team, t.turn)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        mesh.raycast = () => {}
+        group.add(mesh)
+      }
     }
   }
 
-  for (const visual of Object.keys(PROP_OF) as Visual[]) {
-    void loadProp(PROP_OF[visual]).then((prop) => {
-      meshes.set(visual, { prop, meshes: propInstances(prop, CAPACITY[visual], false, group) })
+  const visuals: Visual[] = [...new Set<Visual>([...WEAPON_KINDS.map((k) => WEAPONS[k].model), 'missile', 'missile_crate', 'ammo_556', 'ammo_9mm'])]
+  for (const visual of visuals) {
+    void loadProp(visual).then((prop) => {
+      meshes.set(visual, { prop, meshes: propInstances(prop, CAPACITY[visual] ?? 40, false, group) })
       dirty = true
     }).catch((error) => console.error(`[items] ${visual} model failed to load:`, error))
   }
 
-  const onRack = (item: NetItem) => item.fixed && item.kind === 'launcher'
-  const positionOf = (item: NetItem) => new THREE.Vector3(item.x, heightAt(item.x, item.z) + (onRack(item) ? RACK_TOP : 0), item.z)
+  const onTable = (item: NetItem) => item.fixed && isWeaponItem(item.kind)
+  const positionOf = (item: NetItem) => new THREE.Vector3(item.x, heightAt(item.x, item.z) + (onTable(item) ? RACK_TOP : 0), item.z)
 
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3()
   const rebuild = (camera: THREE.Vector3) => {
     const used = new Map<Visual, number>()
-    const place = (visual: Visual, position: THREE.Vector3, euler: THREE.Euler) => {
+    const place = (visual: Visual, position: THREE.Vector3, euler: THREE.Euler, scale = 1) => {
       const set = meshes.get(visual)
       if (!set) return
       const slot = used.get(visual) ?? 0
-      if (slot >= CAPACITY[visual]) return
+      if (slot >= (CAPACITY[visual] ?? 40)) return
       used.set(visual, slot + 1)
-      m.compose(position, q.setFromEuler(euler), s)
+      m.compose(position, q.setFromEuler(euler), s.setScalar(scale))
       for (const mesh of set.meshes) mesh.setMatrixAt(slot, m)
     }
-    /** A gun lying on its side on the ground (or across the rack). */
+    /** A gun lying on its side on the ground (or across the rack / table). */
     const lying = (visual: Visual, item: NetItem) => {
       const set = meshes.get(visual)
       if (!set) return
       const at = positionOf(item)
-      // On its side: half its width above the surface
       at.y += (set.prop.box.max.x - set.prop.box.min.x) / 2
       place(visual, at, e.set(0, item.yaw, Math.PI / 2, 'YXZ'))
     }
     for (const item of items.values()) {
       if (item.gone) continue
-      if (Math.hypot(item.x - camera.x, item.z - camera.z) > DRAW_DISTANCE) continue
-      switch (item.kind) {
-        case 'launcher':
-        case 'handgun':
-        case 'primary':
-          lying(item.kind, item)
-          break
-        case 'missiles': {
-          if (!item.fixed) {
-            if (item.count > 0) lying('missile', item)
-            break
-          }
-          const crate = meshes.get('missile_crate')
-          const base = positionOf(item)
-          place('missile_crate', base, e.set(0, item.yaw, 0, 'YXZ'))
-          if (!crate) break
-          // Missiles still in the crate: two layers of two, lying lengthways
-          const box = crate.prop.box
-          const depth = box.max.z - box.min.z
-          for (let i = 0; i < Math.min(4, item.count); i++) {
-            const local = p.set(0, 0.32 + Math.floor(i / 2) * 0.24, box.min.z + depth * (i % 2 === 0 ? 0.25 : 0.52))
-            local.applyAxisAngle(new THREE.Vector3(0, 1, 0), item.yaw).add(base)
-            place('missile', local.clone(), e.set(0, item.yaw + Math.PI / 2, 0, 'YXZ'))
-          }
-          break
-        }
-        case 'ammo-primary':
-        case 'ammo-handgun':
-          place(item.kind === 'ammo-primary' ? 'ammo_556' : 'ammo_9mm', positionOf(item), e.set(0, item.yaw, 0, 'YXZ'))
-          break
+      const distance = Math.hypot(item.x - camera.x, item.z - camera.z)
+      if (distance > DRAW_DISTANCE) continue
+      if (isWeaponItem(item.kind)) {
+        if (distance < GUN_DRAW_DISTANCE || item.kind === 'launcher') lying(WEAPONS[item.kind].model, item)
+        continue
       }
+      const ammo = ammoOf(item.kind)
+      if (ammo === 'missile') {
+        if (!item.fixed) {
+          if (item.count > 0) lying('missile', item)
+          continue
+        }
+        const crate = meshes.get('missile_crate')
+        const base = positionOf(item)
+        place('missile_crate', base, e.set(0, item.yaw, 0, 'YXZ'))
+        if (!crate) continue
+        // Missiles still in the crate: two layers of two, lying lengthways
+        const box = crate.prop.box
+        const depth = box.max.z - box.min.z
+        for (let i = 0; i < Math.min(4, item.count); i++) {
+          const local = p.set(0, 0.32 + Math.floor(i / 2) * 0.24, box.min.z + depth * (i % 2 === 0 ? 0.25 : 0.52))
+          local.applyAxisAngle(new THREE.Vector3(0, 1, 0), item.yaw).add(base)
+          place('missile', local.clone(), e.set(0, item.yaw + Math.PI / 2, 0, 'YXZ'))
+        }
+        continue
+      }
+      place(BOX[ammo].visual, positionOf(item), e.set(0, item.yaw, 0, 'YXZ'), BOX[ammo].scale)
     }
     for (const [visual, set] of meshes) {
       for (const mesh of set.meshes) {
@@ -208,7 +212,7 @@ export function createItems(): ItemField {
     positionOf,
     update(camera) {
       // Re-sorting by distance only matters when the camera has moved a fair way
-      if (!dirty && lastCamera.distanceToSquared(camera) < 30 * 30) return
+      if (!dirty && lastCamera.distanceToSquared(camera) < 15 * 15) return
       dirty = false
       lastCamera = camera.clone()
       rebuild(camera)

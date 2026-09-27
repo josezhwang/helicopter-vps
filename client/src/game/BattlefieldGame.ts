@@ -4,15 +4,16 @@ import { createBase, GEM_LOCAL, BASE_HALF, type BaseObjects, type Team } from '.
 import { createRocks, createBushes, createClouds, createGrass, type GrassField, type RockField } from './world/nature'
 import { createForest, type ForestField } from './world/forest'
 import { createTurrets, type Turret, type TurretField } from './world/turrets'
-import { createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, type Fleet, type Vehicle } from './world/vehicles'
+import { createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, CAR_GUN_PITCH, TURRET_PIVOT, GATLING_PIVOT, type Fleet, type Vehicle } from './world/vehicles'
 import { BASE_CENTER, BASE_ROTATION, LAYOUT, PLATEAU_HALF, baseToWorld, baseYaw } from './world/layout'
 import { Player, EYE_HEIGHT } from './world/player'
 import { Viewmodel } from './world/viewmodel'
-import { Arsenal } from './world/weapon'
-import { WEAPONS, WEAPON_KINDS, MACHINE_GUN, LOCK_TIME, LOCK_CONE, type WeaponKind } from './world/weapons'
-import { createItems, ITEM_LABEL, AMMO_OF, type ItemField, type NetItem } from './world/items'
-import { createProjectiles, type Projectiles } from './world/projectiles'
-import { createAvatar, type Avatar } from './world/avatar'
+import { Arsenal, type Shot } from './world/weapon'
+import { AMMO, WEAPONS, MACHINE_GUN, CAR_GUN, LOCK_TIME, LOCK_CONE, type RoundKind, type WeaponKind } from './world/weapons'
+import { createItems, itemLabel, ammoOf, isWeaponItem, type ItemField, type NetItem } from './world/items'
+import { createProjectiles, type Projectiles, type Surface } from './world/projectiles'
+import { createDecals, type Decals } from './world/decals'
+import { createAvatar, muzzleFlashTexture, type Avatar } from './world/avatar'
 import { gameState, setGameState, type RosterEntry } from './state'
 import type { Multiplayer, NetPlayer, NetState, Took, Vec3, WorldSnapshot } from './net'
 
@@ -133,6 +134,10 @@ export class BattlefieldGame {
   private viewmodel: Viewmodel
   private items: ItemField
   private projectiles: Projectiles
+  private decals: Decals
+  /** Right-mouse aiming: current zoom (field of view divisor). */
+  private zoom = 1
+  private carGunCooldown = 0
   private ourBase: BaseObjects
   private enemyBase: BaseObjects
   private bases: { blue: BaseObjects; red: BaseObjects }
@@ -153,7 +158,7 @@ export class BattlefieldGame {
     arrowLeft: false,
     arrowRight: false,
   }
-  private mouse = { shooting: false }
+  private mouse = { shooting: false, aiming: false }
   private carryTarget: Team | null = null
   private clock = new THREE.Clock()
   private disposed = false
@@ -232,6 +237,8 @@ export class BattlefieldGame {
     this.scene.add(this.items.group)
     this.projectiles = createProjectiles()
     this.scene.add(this.projectiles.group)
+    this.decals = createDecals()
+    this.scene.add(this.decals.group)
     if (match.world) this.applyWorld(match.world)
 
     this.player = new Player(this.camera)
@@ -241,11 +248,13 @@ export class BattlefieldGame {
     this.player.setColliders(this.colliders)
     this.player.setCircles([...worldCircles, ...bushCircles])
 
-    this.arsenal = new Arsenal(this.scene, this.camera, () => {
-      // small recoil kick
-      this.player.pitch += this.arsenal.current === 'launcher' ? 0.03 : 0.004
+    this.arsenal = new Arsenal(this.scene, this.camera, (def) => {
+      // Recoil: the view kicks up (less when aiming steadily) and a little sideways
+      const steady = this.mouse.aiming ? 0.6 : 1
+      this.player.pitch += def.kick * steady
+      this.player.yaw += (Math.random() - 0.5) * def.kick * 0.4 * steady
     })
-    this.viewmodel = new Viewmodel(this.camera)
+    this.viewmodel = new Viewmodel(this.camera, muzzleFlashTexture())
 
     // Everything that stops a bullet: terrain, bases, trees, rocks, vehicles, machine guns (player avatars are
     // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
@@ -369,19 +378,29 @@ export class BattlefieldGame {
     this.publishRoster()
   }
 
-  /** Another player fired: muzzle flash on their gun (or at their seat / machine gun) and the round flying to where it landed. */
+  /**
+   * Another player fired: muzzle flash on their gun (or machine gun / car gatling / at their seat), the round
+   * flying to where it landed, and what it did there (hole, dust, sparks).
+   */
   remoteShot(id: string, to: Vec3, weapon: string) {
     const remote = this.remotes.get(id)
     if (!remote?.avatar || !remote.info.online || remote.info.dead || !remote.target) return
     const end = new THREE.Vector3(...to)
     const s = remote.target
     let start: THREE.Vector3
+    let heavy = false
     if (s.gun) {
       const t = this.turrets.turrets.find((g) => g.id === s.gun!.id)
       if (!t) return
-      const eye = new THREE.Vector3()
       start = new THREE.Vector3()
-      this.turrets.gunnerView(t, eye, start)
+      this.turrets.gunnerView(t, new THREE.Vector3(), start)
+      t.recoil = 1
+      heavy = true
+    } else if (weapon === CAR_GUN.id && s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
+      const car = this.fleet.byId.get(s.vehicle.id)!
+      start = this.fleet.carMuzzle(car, new THREE.Vector3())
+      car.gunRecoil = 1
+      heavy = true
     } else if (remote.avatar.group.visible) {
       start = remote.avatar.fire()
     } else if (s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
@@ -390,8 +409,82 @@ export class BattlefieldGame {
     } else {
       return
     }
-    if (weapon === 'machine-gun') this.projectiles.round('bullet_556', start, end, MACHINE_GUN.color)
-    else this.projectiles.round(weapon === 'handgun' ? 'bullet_9mm' : 'bullet_556', start, end, weapon === 'handgun' ? WEAPONS.handgun.color : WEAPONS.primary.color)
+    const def = WEAPONS[weapon as WeaponKind] as (typeof WEAPONS)[WeaponKind] | undefined
+    const round: RoundKind = heavy ? 'bullet_heavy' : def?.round ?? 'bullet_556'
+    const color = heavy ? (weapon === CAR_GUN.id ? CAR_GUN.color : MACHINE_GUN.color) : def?.color ?? 0xffd27a
+    const dir = end.clone().sub(start)
+    const distance = dir.length()
+    dir.normalize()
+    this.projectiles.round(round, start, end, color)
+    this.projectiles.muzzleFlash(start, dir, heavy ? 1.6 : 0.7)
+    // Re-trace the last stretch here to find the surface it struck
+    const hit = new THREE.Raycaster(start, dir, 0.3, distance + 1).intersectObjects(this.targetList, true)[0]
+    if (hit && hit.distance > distance - 1.5) this.applyImpact(hit, dir, heavy || (def?.power ?? 0) >= 40)
+  }
+
+  /** A face normal from a hit, in world space and facing the shooter. */
+  private hitNormal(hit: THREE.Intersection, dir: THREE.Vector3) {
+    if (!hit.face) return dir.clone().negate()
+    const matrix = hit.object.matrixWorld.clone()
+    const instanced = hit.object as THREE.InstancedMesh
+    if (instanced.isInstancedMesh && hit.instanceId !== undefined) {
+      const m = new THREE.Matrix4()
+      instanced.getMatrixAt(hit.instanceId, m)
+      matrix.multiply(m)
+    }
+    const normal = hit.face.normal.clone().transformDirection(matrix)
+    return normal.dot(dir) > 0 ? normal.negate() : normal
+  }
+
+  /** Where a round really meets a base's buildings (its bullets hit simplified boxes; holes belong on the walls). */
+  private baseSurface(base: THREE.Object3D, origin: THREE.Vector3, dir: THREE.Vector3, far: number) {
+    const ray = new THREE.Raycaster(origin, dir, 0, far)
+    const hits: THREE.Intersection[] = []
+    for (const child of base.children) {
+      const mesh = child as THREE.Mesh
+      if (!mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh) continue
+      THREE.Mesh.prototype.raycast.call(mesh, ray, hits)
+    }
+    hits.sort((a, b) => a.distance - b.distance)
+    return hits[0] ?? null
+  }
+
+  /**
+   * What a round did where it struck: dirt kicked up from the ground, chips off rock, concrete dust off walls,
+   * splinters off trees, sparks off vehicles, guns and robots — and a hole in solid surfaces (on vehicles the
+   * hole rides along with them).
+   */
+  private applyImpact(hit: THREE.Intersection, dir: THREE.Vector3, heavy: boolean) {
+    let surface: Surface = 'dirt'
+    let point = hit.point.clone()
+    let normal: THREE.Vector3 | null = null
+    let hole = true
+    let attach: THREE.Object3D | null = null
+    for (let node: THREE.Object3D | null = hit.object; node; node = node.parent) {
+      if (node.userData.playerId) { surface = 'robot'; hole = false; break }
+      const vehicleId = node.userData.vehicleId as string | undefined
+      if (vehicleId) {
+        surface = 'metal'
+        const vehicle = this.fleet.byId.get(vehicleId)
+        const real = vehicle && this.fleet.surfaceHit(vehicle, hit.point.clone().addScaledVector(dir, -3), dir, 7)
+        if (real) { point = real.point; normal = real.normal.dot(dir) > 0 ? real.normal.negate() : real.normal; attach = vehicle.object } else hole = false
+        break
+      }
+      if (node === this.turrets.group) { surface = 'metal'; hole = false; break }
+      if (node === this.forest.trunks) { surface = 'wood'; hole = false; break }
+      if (node === this.rocks.group) { surface = 'rock'; break }
+      if (node === this.bases.blue.group || node === this.bases.red.group) {
+        surface = 'concrete'
+        const real = this.baseSurface(node, hit.point.clone().addScaledVector(dir, -2), dir, 5)
+        if (real) { point = real.point; normal = this.hitNormal(real, dir) } else hole = false
+        break
+      }
+      if (node === this.terrain) break
+    }
+    normal ??= this.hitNormal(hit, dir)
+    this.projectiles.impact(point, normal, surface, heavy)
+    // Ground holes sit a little higher: inside a base the concrete floor lies a few centimetres over the ground
+    if (hole) this.decals.add('hole', point, normal, heavy ? 0.5 : 0.24 + Math.random() * 0.06, attach, hit.object === this.terrain ? 0.07 : 0.02)
   }
 
   /** Another player's anti-aircraft missile, homing on a helicopter (the server decides the hit). */
@@ -409,6 +502,8 @@ export class BattlefieldGame {
       vehicle.object.rotation.set(at.r[0], at.r[1], at.r[2])
     }
     this.projectiles.explosion(this.aimPoint(vehicle), 2)
+    const p = vehicle.object.position
+    this.decals.add('scorch', new THREE.Vector3(p.x, heightAt(p.x, p.z), p.z), new THREE.Vector3(0, 1, 0), 9, null, 0.08)
     vehicle.destroyed = true
     if (this.vehicle === vehicle) {
       this.transition = null
@@ -425,6 +520,7 @@ export class BattlefieldGame {
     const vehicle = this.fleet.byId.get(id)
     if (!vehicle) return
     vehicle.occupants.fill(null)
+    this.decals.clear(vehicle.object)
     this.fleet.sendHome(vehicle)
   }
 
@@ -455,22 +551,24 @@ export class BattlefieldGame {
   took(took: Took) {
     this.pendingTake = null
     if (!took.kind) return
-    const name = ITEM_LABEL[took.kind]
-    if (took.weapon && (took.kind === 'handgun' || took.kind === 'primary' || took.kind === 'launcher')) {
+    const name = itemLabel(took.kind)
+    if (took.weapon && isWeaponItem(took.kind)) {
+      if (this.arsenal.inSlotOf(took.kind)) return
       this.arsenal.give(took.kind, took.mag)
-      this.arsenal.addReserve(took.kind, took.count)
-      setGameState({ message: took.kind === 'launcher' ? 'AA launcher picked up. Load it with missiles from the crates, lock on to an enemy aircraft for 2 s, fire!' : `Picked up a ${name}.` })
+      this.arsenal.addReserve(WEAPONS[took.kind].ammo, took.count)
+      const def = WEAPONS[took.kind]
+      setGameState({ message: took.kind === 'launcher' ? 'AA launcher picked up. Load it with missiles from the crates, lock on to an enemy aircraft for 2 s, fire!' : `Picked up the ${name}${def.scope ? ' — right mouse for the scope' : ''}.` })
       return
     }
     if (took.count <= 0) {
       setGameState({ message: `Nothing left to take (${name}).` })
       return
     }
-    const kind = AMMO_OF[took.kind]
-    this.arsenal.addReserve(kind, took.count)
-    // A launcher waiting for its first missile loads it straight away
-    if (this.arsenal.current === kind && this.arsenal.mag === 0) this.arsenal.reload()
-    setGameState({ message: kind === 'launcher' ? `Took ${took.count} AA missile${took.count > 1 ? 's' : ''}.` : `Took ${took.count} rounds of ${name}.` })
+    const ammo = ammoOf(took.kind)
+    this.arsenal.addReserve(ammo, took.count)
+    // A weapon waiting for rounds (a launcher for its first missile) loads straight away
+    if (this.arsenal.def?.ammo === ammo && this.arsenal.mag === 0) this.arsenal.reload()
+    setGameState({ message: ammo === 'missile' ? `Took ${took.count} AA missile${took.count > 1 ? 's' : ''}.` : `Took ${took.count} ${AMMO[ammo].name}.` })
   }
 
   /** Back at our spawn, looking out of the gate. */
@@ -510,9 +608,7 @@ export class BattlefieldGame {
     this.leaveTurret()
     this.leaveVehicle()
     // What we carried is on the ground where we fell (the server dropped it); we respawn with fresh guns
-    this.arsenal.slots = {}
-    this.arsenal.reserve = { handgun: 0, primary: 0, launcher: 0 }
-    this.arsenal.current = null
+    this.arsenal.clear()
     // Put the body on the ground (it may have been in a vehicle) so others see it fall there
     this.player.position.y = heightAt(this.player.position.x, this.player.position.z) + EYE_HEIGHT
     this.carryTarget = null
@@ -634,10 +730,14 @@ export class BattlefieldGame {
       yaw: this.player.yaw,
       pitch: this.player.pitch,
       vehicle: vehicle && pose
-        ? { id: vehicle.id, seat: this.seat, p: [pose.position.x, pose.position.y, pose.position.z], r: [pose.rotation.x, pose.rotation.y, pose.rotation.z], spin: vehicle.kind === 'heli' ? vehicle.spin : this.carSpeed }
+        ? {
+          id: vehicle.id, seat: this.seat, p: [pose.position.x, pose.position.y, pose.position.z], r: [pose.rotation.x, pose.rotation.y, pose.rotation.z],
+          spin: vehicle.kind === 'heli' ? vehicle.spin : this.carSpeed,
+          ...(vehicle.kind === 'car' && this.seat === 0 ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
+        }
         : null,
       gun: t ? { id: t.id, yaw: t.yaw, pitch: t.pitch } : null,
-      w: this.arsenal.current ? WEAPON_KINDS.indexOf(this.arsenal.current) : -1,
+      w: this.arsenal.kind ?? '',
       inv: this.arsenal.snapshot(),
       flag: this.carryTarget !== null,
       hp: gameState.health,
@@ -676,7 +776,7 @@ export class BattlefieldGame {
       remote.speed = THREE.MathUtils.lerp(remote.speed, groundSpeed, 1 - Math.exp(-dt * 6))
       avatar.visible = !s.vehicle
       remote.avatar.carriedGem.visible = s.flag
-      remote.avatar.setWeapon(s.gun ? null : WEAPON_KINDS[s.w ?? -1] ?? null)
+      remote.avatar.setWeapon(s.gun || s.vehicle ? null : (s.w || null))
       if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance)
       this.syncRemoteVehicle(remote.info.id, s, k)
       // On a machine gun: the gun follows their aim on our screen too
@@ -722,6 +822,10 @@ export class BattlefieldGame {
     const pose = claimed.object
     const target = new THREE.Vector3(...s.vehicle.p)
     claimed.targetSpin = s.vehicle.spin
+    if (s.vehicle.aim) {
+      claimed.aimYaw = lerpAngle(claimed.aimYaw, s.vehicle.aim[0], k)
+      claimed.aimPitch = THREE.MathUtils.lerp(claimed.aimPitch, s.vehicle.aim[1], k)
+    }
     if (pose.position.distanceToSquared(target) > SNAP_DISTANCE ** 2) {
       pose.position.copy(target)
       pose.rotation.set(s.vehicle.r[0], s.vehicle.r[1], s.vehicle.r[2])
@@ -793,22 +897,26 @@ export class BattlefieldGame {
       if (!locked) {
         for (const key of Object.keys(this.input) as Array<keyof typeof this.input>) this.input[key] = false
         this.mouse.shooting = false
+        this.mouse.aiming = false
       }
     })
 
     add(document, 'mousemove', ((e: MouseEvent) => {
       if (document.pointerLockElement !== this.renderer.domElement) return
-      // Subtle freelook while piloting
-      const scale = this.vehicle?.kind === 'heli' && this.seat === 0 ? 0.5 : 1
+      // Subtle freelook while piloting; finer aim when zoomed in
+      const scale = (this.vehicle?.kind === 'heli' && this.seat === 0 ? 0.5 : 1) / this.zoom
       this.player.look(e.movementX * scale, e.movementY * scale)
     }) as EventListener)
 
     add(document, 'mousedown', ((e: MouseEvent) => {
       if (e.button === 0) this.mouse.shooting = true
+      if (e.button === 2) this.mouse.aiming = true
     }) as EventListener)
     add(document, 'mouseup', ((e: MouseEvent) => {
       if (e.button === 0) this.mouse.shooting = false
+      if (e.button === 2) this.mouse.aiming = false
     }) as EventListener)
+    add(this.renderer.domElement, 'contextmenu', ((e: MouseEvent) => e.preventDefault()) as EventListener)
 
     add(document, 'keydown', ((e: KeyboardEvent) => {
       switch (e.code) {
@@ -883,20 +991,27 @@ export class BattlefieldGame {
     if (!this.onFoot || this.pendingTake) return
     const item = this.items.nearest(this.feet())
     if (item) {
-      const weaponItem = item.kind === 'handgun' || item.kind === 'primary' || item.kind === 'launcher'
-      const ammoKind = AMMO_OF[item.kind]
-      const want = this.arsenal.space(ammoKind)
-      if (weaponItem && !this.arsenal.has(item.kind as WeaponKind)) {
+      const weaponItem = isWeaponItem(item.kind)
+      const ammo = ammoOf(item.kind)
+      if (isWeaponItem(item.kind) && !this.arsenal.has(item.kind)) {
+        // One weapon per slot: the one we hold there goes down first (with its rounds)
+        const held = this.arsenal.inSlotOf(item.kind)
+        if (held) {
+          const dropped = this.arsenal.remove(WEAPONS[item.kind].slot)!
+          this.match.net.sendDrop(dropped.kind, dropped.mag, dropped.spare)
+        }
         this.pendingTake = item.id
-        this.match.net.sendTake(item.id, 'weapon', want)
+        this.match.net.sendTake(item.id, 'weapon', this.arsenal.space(ammo))
+        window.setTimeout(() => { if (this.pendingTake === item.id) this.pendingTake = null }, 2000)
         return
       }
+      const want = this.arsenal.space(ammo)
       if (want <= 0) {
-        setGameState({ message: `You can't carry any more ${ammoKind === 'launcher' ? 'missiles' : `${WEAPONS[ammoKind].name.toLowerCase()} rounds`}.` })
+        setGameState({ message: `You can't carry any more ${AMMO[ammo].name}.` })
         return
       }
       if (item.count + (weaponItem ? item.mag : 0) <= 0) {
-        setGameState({ message: `The ${ITEM_LABEL[item.kind]} is empty.` })
+        setGameState({ message: `The ${itemLabel(item.kind)} is empty.` })
         return
       }
       this.pendingTake = item.id
@@ -904,29 +1019,26 @@ export class BattlefieldGame {
       window.setTimeout(() => { if (this.pendingTake === item.id) this.pendingTake = null }, 2000)
       return
     }
-    const kind = this.arsenal.current
-    if (!kind) return
-    const dropped = this.arsenal.remove(kind)
+    const slot = this.arsenal.current
+    if (!slot) return
+    const dropped = this.arsenal.remove(slot)
     if (!dropped) return
-    this.match.net.sendDrop(kind, dropped.mag, dropped.spare)
-    setGameState({ message: `Dropped your ${WEAPONS[kind].name.toLowerCase()}.` })
+    this.match.net.sendDrop(dropped.kind, dropped.mag, dropped.spare)
+    setGameState({ message: `Dropped your ${WEAPONS[dropped.kind].name}.` })
   }
 
   private pickupPrompt(): string {
     if (!this.onFoot) return ''
     const item = this.items.nearest(this.feet())
     if (!item) return ''
-    const name = ITEM_LABEL[item.kind]
-    switch (item.kind) {
-      case 'handgun':
-      case 'primary':
-      case 'launcher':
-        return this.arsenal.has(item.kind) ? `Take ${item.kind === 'launcher' ? 'its missiles' : 'its rounds'} (${item.count + item.mag})` : `Pick up ${name}`
-      case 'missiles':
-        return item.count > 0 ? `Take AA missiles (${item.count} left)` : 'Missile crate (empty)'
-      default:
-        return item.count > 0 ? `Take ${name} (${item.count} rounds)` : `${name} box (empty)`
+    const name = itemLabel(item.kind)
+    if (isWeaponItem(item.kind)) {
+      if (this.arsenal.has(item.kind)) return `Take ${item.kind === 'launcher' ? 'its missiles' : 'its rounds'} (${item.count + item.mag})`
+      const held = this.arsenal.inSlotOf(item.kind)
+      return held ? `Swap your ${WEAPONS[held.kind].name} for the ${name}` : `Pick up the ${name}`
     }
+    if (ammoOf(item.kind) === 'missile') return item.count > 0 ? `Take AA missiles (${item.count} left)` : 'Missile crate (empty)'
+    return item.count > 0 ? `Take ${name} (${item.count})` : `${name} box (empty)`
   }
 
   // ---------------------------------------------------------------- vehicles and machine guns: [E]
@@ -1376,10 +1488,80 @@ export class BattlefieldGame {
     const origin = muzzle.clone().addScaledVector(dir, 0.4)
     const hits = new THREE.Raycaster(origin, dir, 0, MACHINE_GUN.range).intersectObjects(targets, true)
     const end = hits[0]?.point.clone() ?? origin.clone().addScaledVector(dir, MACHINE_GUN.range)
-    this.projectiles.round('bullet_556', muzzle, end, MACHINE_GUN.color)
+    this.projectiles.round('bullet_heavy', muzzle, end, MACHINE_GUN.color)
+    this.projectiles.muzzleFlash(muzzle, dir, 1.8)
+    this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -1.6), dir)
+    turret.recoil = 1
     this.match.net.sendShot([end.x, end.y, end.z], MACHINE_GUN.id)
-    if (hits[0]) this.reportHit(hits[0].object, MACHINE_GUN.id)
-    this.player.pitch += 0.012
+    if (hits[0]) {
+      this.applyImpact(hits[0], dir, true)
+      this.reportHit(hits[0].object, MACHINE_GUN.id)
+    }
+    // A heavy gun shakes the gunner
+    this.player.pitch += 0.018
+    this.player.yaw += (Math.random() - 0.5) * 0.01
+  }
+
+  /** A spent casing flung out to the right of a gun firing along `dir`. */
+  private ejectCasing(kind: 'bullet_9mm' | 'bullet_556' | 'bullet_heavy', at: THREE.Vector3, dir: THREE.Vector3) {
+    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize()
+    const velocity = right.multiplyScalar(2 + Math.random()).add(new THREE.Vector3(0, 2 + Math.random() * 1.2, 0)).addScaledVector(dir, -0.6)
+    this.projectiles.casing(kind, at, velocity)
+  }
+
+  /**
+   * Driving a battle car: its roof gatling swings round to whatever the crosshair is on (at a turret's pace)
+   * and fires heavy rounds while the left button is held. Works in the chase and the roof view.
+   */
+  private updateCarGun(car: Vehicle, dt: number) {
+    const origin = this.camera.getWorldPosition(new THREE.Vector3())
+    const view = this.camera.getWorldDirection(new THREE.Vector3())
+    const targets = this.shootTargets()
+    const sight = new THREE.Raycaster(origin, view, 2, CAR_GUN.range).intersectObjects(targets, true)[0]
+    const aim = sight?.point ?? origin.clone().addScaledVector(view, CAR_GUN.range)
+    // Where that is from the gun, in the car's own frame
+    car.object.updateMatrixWorld()
+    const local = car.object.worldToLocal(aim.clone())
+    const wantYaw = Math.atan2(local.x - TURRET_PIVOT.x, local.z - TURRET_PIVOT.z)
+    const flat = Math.hypot(local.x - TURRET_PIVOT.x, local.z - TURRET_PIVOT.z)
+    const wantPitch = THREE.MathUtils.clamp(Math.atan2(local.y - GATLING_PIVOT.y, flat), -CAR_GUN_PITCH.down, CAR_GUN_PITCH.up)
+    const turn = 3 * dt
+    car.aimYaw += THREE.MathUtils.clamp(wrap(wantYaw - car.aimYaw), -turn, turn)
+    car.aimPitch += THREE.MathUtils.clamp(wantPitch - car.aimPitch, -turn, turn)
+
+    this.carGunCooldown = Math.max(0, this.carGunCooldown - dt)
+    if (!this.mouse.shooting || this.carGunCooldown > 0) return
+    this.carGunCooldown = CAR_GUN.fireRate
+    const muzzle = this.fleet.carMuzzle(car, new THREE.Vector3())
+    const dir = aim.clone().sub(muzzle).normalize()
+    dir.add(new THREE.Vector3((Math.random() - 0.5) * CAR_GUN.spread, (Math.random() - 0.5) * CAR_GUN.spread, (Math.random() - 0.5) * CAR_GUN.spread)).normalize()
+    const hits = new THREE.Raycaster(muzzle.clone().addScaledVector(dir, 0.3), dir, 0, CAR_GUN.range).intersectObjects(targets, true)
+    const end = hits[0]?.point.clone() ?? muzzle.clone().addScaledVector(dir, CAR_GUN.range)
+    this.projectiles.round('bullet_heavy', muzzle, end, CAR_GUN.color)
+    this.projectiles.muzzleFlash(muzzle, dir, 1.3)
+    this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -1.2), dir)
+    car.gunRecoil = 1
+    this.match.net.sendShot([end.x, end.y, end.z], CAR_GUN.id)
+    if (hits[0]) {
+      this.applyImpact(hits[0], dir, true)
+      this.reportHit(hits[0].object, CAR_GUN.id)
+    }
+  }
+
+  /** Right mouse: aim down the sights (a little zoom), or look through a sniper's scope. */
+  private updateZoom(dt: number, canShoot: boolean) {
+    const def = this.arsenal.def
+    const want = canShoot && this.mouse.aiming && def && !this.arsenal.reloading ? def.zoom : 1
+    const next = THREE.MathUtils.lerp(this.zoom, want, Math.min(1, dt * 12))
+    this.zoom = Math.abs(next - want) < 0.01 ? want : next
+    const fov = 75 / this.zoom
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov
+      this.camera.updateProjectionMatrix()
+    }
+    const scoped = !!def?.scope && this.zoom > def.zoom * 0.8
+    if (scoped !== gameState.scoped) setGameState({ scoped })
+    return scoped
   }
 
   // ---------------------------------------------------------------- launcher
@@ -1443,7 +1625,7 @@ export class BattlefieldGame {
       return true
     }
     if (this.arsenal.mag <= 0 && this.mouse.shooting) {
-      if (this.arsenal.reserve.launcher <= 0) setGameState({ message: 'No missiles: take some from the missile crates in a base.' })
+      if (this.arsenal.reserve.missile <= 0) setGameState({ message: 'No missiles: take some from the missile crates in a base.' })
       else this.arsenal.reload()
     }
     if (!this.arsenal.fireMissile(this.mouse.shooting)) return true
@@ -1494,20 +1676,33 @@ export class BattlefieldGame {
     this.tryCapture()
   }
 
+  /** Our shot: the round flies from the gun's muzzle, a casing flies out, and what it hit shows it. */
+  private ownShot(shot: Shot) {
+    const def = WEAPONS[shot.kind]
+    const gun = this.viewmodel.fired()
+    const start = gun?.muzzle ?? shot.start
+    if (def.round) this.projectiles.round(def.round, start, shot.end, def.color)
+    if (gun && def.round && def.round !== 'bolt') this.ejectCasing(def.round, gun.eject, shot.dir)
+    this.match.net.sendShot([shot.end.x, shot.end.y, shot.end.z], shot.kind)
+    if (shot.hit) this.applyImpact(shot.hit, shot.dir, def.power >= 40 || def.round === 'bullet_heavy')
+    if (shot.object) this.reportHit(shot.object, shot.kind)
+  }
+
   private syncHudState() {
     const def = this.arsenal.def
-    const weapons = WEAPON_KINDS.filter((k) => this.arsenal.has(k))
+    const weapons = this.arsenal.carried()
     const key = weapons.join(',')
     if (key !== this.lastWeaponsKey) {
       this.lastWeaponsKey = key
       setGameState({ weapons })
     }
     setGameState({
-      current: this.arsenal.current,
+      current: this.arsenal.kind,
+      carGun: this.vehicle?.kind === 'car' && this.seat === 0,
       weaponName: def?.name ?? '',
       ammo: this.arsenal.mag,
       maxAmmo: def?.magSize ?? 0,
-      reserve: def ? this.arsenal.reserve[def.kind] : 0,
+      reserve: def ? this.arsenal.reserve[def.ammo] : 0,
       reloading: this.arsenal.reloading,
       carryingGem: this.carryTarget !== null,
       interactPrompt: this.interactPrompt(),
@@ -1569,28 +1764,26 @@ export class BattlefieldGame {
       }
 
       this.arsenal.tick(dt)
-      // Pilots fly, they can't shoot; passengers, drivers in the roof-gun view and anyone on foot can
-      const canShoot = !this.dead && !this.transition && !this.turret && (
-        !this.vehicle || (this.vehicle.kind === 'heli' ? this.seat !== 0 : this.cameraMode === 'inside'))
+      // Hand weapons: on foot and in a helicopter's passenger seats. Pilots can't shoot; car drivers use the roof gatling.
+      const canShoot = !this.dead && !this.transition && !this.turret && (!this.vehicle || (this.vehicle.kind === 'heli' && this.seat !== 0))
+      if (this.vehicle?.kind === 'car' && this.seat === 0 && !this.transition && !this.dead) this.updateCarGun(this.vehicle, dt)
+      const scoped = this.updateZoom(realDt, canShoot)
       const launcherInHand = this.updateLauncher(realDt, canShoot)
       if (canShoot && !launcherInHand) {
-        const shot = this.arsenal.tryFire(this.mouse, this.shootTargets())
-        if (shot) {
-          const def = WEAPONS[shot.kind]
-          if (def.bullet) this.projectiles.round(def.bullet, shot.start, shot.end, def.color)
-          this.match.net.sendShot([shot.end.x, shot.end.y, shot.end.z], shot.kind)
-          if (shot.object) this.reportHit(shot.object, shot.kind)
-        }
+        const shot = this.arsenal.tryFire(this.mouse, this.shootTargets(), this.mouse.aiming ? 0.3 : 1)
+        if (shot) this.ownShot(shot)
       } else if (!canShoot) {
         this.arsenal.holdTrigger(this.mouse.shooting)
       }
       this.projectiles.update(realDt)
-      this.viewmodel.show(this.arsenal.current)
+      this.decals.update()
+      this.viewmodel.show(this.arsenal.kind)
       this.viewmodel.update(dt, {
         recoilKick: this.arsenal.shotCount !== this.lastShotCount,
         reloading: this.arsenal.reloading,
-        hidden: !canShoot || gameState.finished || this.dead,
+        hidden: !canShoot || scoped || gameState.finished || this.dead,
         moving: this.input.forward || this.input.back || this.input.left || this.input.right,
+        aiming: this.mouse.aiming && canShoot,
         time,
       })
       this.lastShotCount = this.arsenal.shotCount
