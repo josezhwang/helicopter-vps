@@ -24,7 +24,8 @@ import { AMMO, WEAPONS, MACHINE_GUN, CAR_GUN, LOCK_TIME, LOCK_CONE, type RoundKi
 import { createItems, itemLabel, ammoOf, isWeaponItem, type ItemField, type NetItem } from './world/items'
 import { createProjectiles, type Projectiles, type Surface } from './world/projectiles'
 import { createDecals, type Decals } from './world/decals'
-import { createAvatar, muzzleFlashTexture, setRobotDetail, type Avatar } from './world/avatar'
+import { createAvatar, muzzleFlashTexture, preloadRobot, setRobotDetail, type Avatar } from './world/avatar'
+import './world/loading'
 import { gameState, radar, setGameState, type KillEntry, type RadarBlip, type RosterEntry } from './state'
 import type { BlastKind, Multiplayer, NetPlayer, NetState, ProjectileKind, Took, Vec3, WorldSnapshot } from './net'
 
@@ -130,6 +131,11 @@ const MECH_CANNON = { id: 'mech-cannon', power: 22, fireRate: 0.11, range: 420, 
 const MECH_SALVO = 6
 /** The helicopter's nose gun (the gunner's seat). */
 const HELI_GUN = { id: 'heli-gun', power: 16, fireRate: 0.09, range: 400, spread: 0.012, color: 0xffd08a }
+/** The pilot's missiles: salvos of four from the wing pods (helicopter space), then a reload. */
+const HELI_PODS = [new THREE.Vector3(2.35, 1.2, 0.8), new THREE.Vector3(-2.35, 1.2, 0.8)]
+const HELI_SALVO = 4
+const HELI_ROCKET_GAP = 0.22
+const HELI_SALVO_RELOAD = 6
 const MECH_ROCKET_GAP = 0.16
 const MECH_SALVO_RELOAD = 7
 /** Metres per footstep (for the thud). */
@@ -146,8 +152,18 @@ const BLAST_SIZE: Record<BlastKind, number> = { shell: 1.5, rocket: 1.4, grenade
 /** What the kill feed calls each way to die (weapons use their own names). */
 const HOW_LABEL: Record<string, string> = {
   'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Helicopter nose gun', missile: 'AA missile', shell: 'Tank shell', rocket: 'Rocket',
-  grenade: 'Grenade', barrel: 'Barrel', wreck: 'Wreck',
+  grenade: 'Grenade', barrel: 'Barrel', wreck: 'Wreck', melee: 'Melee', assassination: 'Assassination',
 }
+/** Melee: how far a strike reaches (the server allows a little more), how often, and the lunge's speed. */
+const MELEE_REACH = 2.9
+const MELEE_COOLDOWN = 0.8
+const MELEE_LUNGE = 7
+/** Kills this close together chain into multi-kills. */
+const MULTI_KILL_GAP = 4500
+const MULTI_KILL = ['', '', 'DOUBLE KILL', 'TRIPLE KILL', 'QUAD KILL', 'MULTI KILL']
+const SPREE: Record<number, string> = { 5: 'KILLING SPREE', 10: 'RAMPAGE', 15: 'UNSTOPPABLE', 20: 'UNTOUCHABLE' }
+/** How long each callout stays up. */
+const ANNOUNCE_MS = 1900
 const howLabel = (how: string) => HOW_LABEL[how] ?? WEAPONS[how as WeaponKind]?.name ?? how
 /** What each weapon sounds like. */
 const SHOT_SOUND: Record<string, ShotSound> = {
@@ -216,6 +232,7 @@ export class BattlefieldGame {
   private mechGunCooldown = 0
   private mechSalvo = { left: MECH_SALVO, next: 0, reloadUntil: 0 }
   private mechStep = 0
+  private heliSalvo = { left: HELI_SALVO, next: 0, reloadUntil: 0 }
   private mechAim = { distance: 300, at: 0 }
   private shadeRay = new THREE.Raycaster()
   /** Two lights that flash where things blow up and where we fire (always present, dark when idle). */
@@ -233,6 +250,17 @@ export class BattlefieldGame {
   private solidCircles: Array<{ x: number; z: number; r: number }> = []
   private colliders: THREE.Box3[] = []
   private dead = false
+  /** Seconds until the next melee strike. */
+  private meleeTimer = 0
+  /** Kills since our last death, the current multi-kill chain and when its last kill landed. */
+  private spree = 0
+  private chain = 0
+  private lastKillAt = 0
+  /** Callouts waiting their turn, and when the one on screen went up. */
+  private announceQueue: string[] = []
+  private announcedAt = 0
+  /** The shield is on its way back up (so the recharge sound plays once per refill). */
+  private recharging = false
   private sky: SkyRig
   private water: ReturnType<typeof createWater>
   private graphics: Graphics
@@ -312,6 +340,7 @@ export class BattlefieldGame {
 
     // World
     setRobotDetail(PROFILES[quality].robotLite)
+    preloadRobot()
     this.terrain = createTerrain({ textureSize: PROFILES[quality].terrainTextures, anisotropy: Math.min(PROFILES[quality].anisotropy, this.renderer.capabilities.getMaxAnisotropy()) })
     const worldCircles = this.solidCircles
     this.scene.add(this.terrain)
@@ -415,7 +444,7 @@ export class BattlefieldGame {
     const enemy = TEAM_NAME[other(this.team)]
     setGameState({
       team: this.team,
-      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} gem and bring it to your ${TEAM_NAME[this.team]} gem. [F] switch weapon, [Q] grenade, [G] pick up / drop, [E] vehicles and machine guns.`,
+      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} gem and bring it to your ${TEAM_NAME[this.team]} gem. [F] switch weapon, [Q] grenade, [V] melee, [G] pick up / drop, [E] vehicles and machine guns.`,
     })
     this.publishRoster()
     this.bindEvents()
@@ -474,20 +503,41 @@ export class BattlefieldGame {
     remote.target = state
   }
 
-  applyHp(id: string, hp: number, by: string) {
+  /** Health and energy shield from the server (`shield` -1 when the message didn't say). */
+  applyHp(id: string, hp: number, by: string, shield = -1) {
     if (id === this.match.you) {
-      const took = hp < gameState.health
-      if (took) this.audio.ui('hurt')
-      setGameState({ health: hp, damageTaken: gameState.damageTaken + (took ? 1 : 0), ...(took ? { damageDir: this.damageDirection(by) } : {}) })
+      const newShield = shield >= 0 ? shield : hp <= 0 ? 0 : gameState.shield
+      const hurt = hp < gameState.health
+      const shieldHit = newShield < gameState.shield
+      if (hurt) this.audio.ui('hurt')
+      else if (shieldHit) this.audio.ui(newShield <= 0 ? 'shieldDown' : 'shield')
+      if (hurt || shieldHit) this.recharging = false
+      else if (newShield > gameState.shield && !this.recharging) {
+        this.recharging = true
+        this.audio.ui('recharge')
+      }
+      const took = hurt || shieldHit
+      setGameState({
+        health: hp,
+        shield: newShield,
+        damageTaken: gameState.damageTaken + (hurt ? 1 : 0),
+        shieldHits: gameState.shieldHits + (shieldHit && !hurt ? 1 : 0),
+        ...(took ? { damageDir: this.damageDirection(by) } : {}),
+      })
       this.publishRoster()
       return
     }
     const remote = this.remotes.get(id)
     if (remote) {
+      const before = remote.info.shield ?? 100
+      const after = shield >= 0 ? shield : hp <= 0 ? 0 : before
       if (hp < remote.info.hp && hp > 0) remote.avatar?.flinch()
+      // Their shield shimmers where it soaks the hit (a big flash as it breaks)
+      if (after < before && hp > 0) remote.avatar?.shieldFlare(after <= 0 ? 1.8 : 1)
       remote.info.hp = hp
+      remote.info.shield = after
     }
-    if (by === this.match.you && hp < 100) {
+    if (by === this.match.you && (hp < 100 || shield >= 0)) {
       setGameState({ hitsLanded: gameState.hitsLanded + 1 })
       if (hp > 0) this.audio.ui('hit')
     }
@@ -549,7 +599,10 @@ export class BattlefieldGame {
   playerKilled(id: string, by: string, how = '') {
     const killer = this.nameOf(by)
     this.addKill(by, id, how)
-    if (by === this.match.you && id !== this.match.you) this.audio.ui('kill')
+    if (by === this.match.you && id !== this.match.you) {
+      this.audio.ui('kill')
+      this.countKill(how)
+    }
     if (id === this.match.you) {
       this.die(killer)
       return
@@ -571,7 +624,8 @@ export class BattlefieldGame {
       this.dead = false
       this.arsenal.reset()
       this.respawnPlayer()
-      setGameState({ dead: false, health: 100, message: 'Back in the fight! Fresh handgun and primary gun.' })
+      this.recharging = false
+      setGameState({ dead: false, health: 100, shield: 100, message: 'Back in the fight! Fresh handgun and primary gun.' })
       this.publishRoster()
       return
     }
@@ -579,6 +633,7 @@ export class BattlefieldGame {
     if (!remote) return
     remote.info.dead = false
     remote.info.hp = 100
+    remote.info.shield = 100
     remote.snapped = false
     remote.diedInVehicle = false
     remote.avatar?.revive()
@@ -913,7 +968,7 @@ export class BattlefieldGame {
   private applyOwnVitals(players: NetPlayer[]) {
     const me = players.find((p) => p.id === this.match.you)
     if (!me) return
-    setGameState({ health: me.hp ?? 100 })
+    setGameState({ health: me.hp ?? 100, shield: me.shield ?? (me.dead ? 0 : 100) })
     if (me.dead && !this.dead) this.die(null)
   }
 
@@ -925,8 +980,75 @@ export class BattlefieldGame {
     return id === this.match.you ? this.team : this.remotes.get(id)?.info.team ?? null
   }
 
+  /** One of our kills: multi-kill chains, sprees and assassinations get a callout. */
+  private countKill(how: string) {
+    const now = performance.now()
+    this.spree++
+    this.chain = now - this.lastKillAt < MULTI_KILL_GAP ? this.chain + 1 : 1
+    this.lastKillAt = now
+    if (how === 'assassination') this.announce('ASSASSINATION')
+    if (this.chain >= 2) this.announce(MULTI_KILL[Math.min(this.chain, MULTI_KILL.length - 1)])
+    if (SPREE[this.spree]) this.announce(SPREE[this.spree])
+  }
+
+  /** A big callout in the middle of the screen (queued behind any already showing). */
+  private announce(text: string) {
+    this.announceQueue.push(text)
+    this.nextAnnouncement()
+  }
+
+  private nextAnnouncement() {
+    const now = performance.now()
+    if (gameState.announcement && now - this.announcedAt < ANNOUNCE_MS) return
+    const text = this.announceQueue.shift()
+    if (!text) {
+      if (gameState.announcement) setGameState({ announcement: '' })
+      return
+    }
+    this.announcedAt = now
+    this.audio.ui('announce')
+    setGameState({ announcement: text, announceId: gameState.announceId + 1 })
+  }
+
+  /**
+   * [V] on foot: a melee strike with the gun butt. It lunges at an enemy right in front of us; the server decides
+   * the damage (a heavy blow through the shield, or an instant takedown from behind).
+   */
+  private melee() {
+    if (this.dead || this.vehicle || this.turret || this.transition || this.meleeTimer > 0 || gameState.finished) return
+    this.meleeTimer = MELEE_COOLDOWN
+    this.viewmodel.bash()
+    this.audio.ui('melee')
+    const eye = this.player.position
+    const forward = new THREE.Vector3(-Math.sin(this.player.yaw), 0, -Math.cos(this.player.yaw))
+    let best: { id: string; remote: RemotePlayer; distance: number } | null = null
+    for (const [id, remote] of this.remotes) {
+      const s = remote.target
+      if (!s || remote.info.dead || remote.info.team === this.team || s.vehicle || s.gun) continue
+      const to = new THREE.Vector3(s.p[0] - eye.x, s.p[1] - eye.y, s.p[2] - eye.z)
+      const distance = to.length()
+      if (distance > MELEE_REACH || Math.abs(to.y) > 1.6) continue
+      // In front of us (or so close it doesn't matter)
+      to.y = 0
+      if (distance > 1.2 && to.normalize().dot(forward) < 0.55) continue
+      if (!best || distance < best.distance) best = { id, remote, distance }
+    }
+    if (!best) return
+    // Lunge in and strike
+    const s = best.remote.target!
+    const to = new THREE.Vector3(s.p[0] - eye.x, 0, s.p[2] - eye.z)
+    if (to.lengthSq() > 1) this.player.velocity.addScaledVector(to.normalize(), MELEE_LUNGE)
+    this.match.net.sendMelee(best.id)
+    const at = best.remote.avatar?.group.visible ? best.remote.avatar.group.position.clone().setY(best.remote.avatar.group.position.y + 1.3) : new THREE.Vector3(s.p[0], s.p[1] - 0.4, s.p[2])
+    this.projectiles.impact(at, forward.clone().negate(), 'robot', true)
+    this.audio.impact(at, 'robot')
+  }
+
   private die(killer: string | null) {
     this.dead = true
+    this.spree = 0
+    this.chain = 0
+    this.recharging = false
     this.deathCamRoll = 0
     this.transition = null
     this.throwTimer = 0
@@ -944,6 +1066,7 @@ export class BattlefieldGame {
     setGameState({
       dead: true,
       health: 0,
+      shield: 0,
       carryingGem: false,
       message: `${killer ? `You were eliminated by ${killer}` : 'You were eliminated'}. Respawning in 5 seconds…`,
     })
@@ -1118,7 +1241,7 @@ export class BattlefieldGame {
         ? {
           id: vehicle.id, seat: this.seat, p: [pose.position.x, pose.position.y, pose.position.z], r: [pose.rotation.x, pose.rotation.y, pose.rotation.z],
           spin: vehicle.kind === 'heli' ? vehicle.spin : this.carSpeed,
-          ...((vehicle.kind === 'heli' ? this.seat === 1 : this.seat === 0) ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
+          ...(this.seat === 0 ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
         }
         : null,
       gun: t ? { id: t.id, yaw: t.yaw, pitch: t.pitch } : null,
@@ -1202,11 +1325,6 @@ export class BattlefieldGame {
     if (claimed.occupants[seat] !== playerId) {
       claimed.occupants[seat] = playerId
       claimed.doorHold[seat] = performance.now() + DOOR_HOLD_MS
-    }
-    // The gunner of a helicopter works its nose gun
-    if (claimed.kind === 'heli' && seat === 1 && s.vehicle.aim && !(claimed === this.vehicle && this.seat === 1)) {
-      claimed.aimYaw = lerpAngle(claimed.aimYaw, s.vehicle.aim[0], k)
-      claimed.aimPitch = THREE.MathUtils.lerp(claimed.aimPitch, s.vehicle.aim[1], k)
     }
     if (seat !== 0 || claimed === this.vehicle) return
     const pose = claimed.object
@@ -1338,7 +1456,11 @@ export class BattlefieldGame {
           if (!e.repeat) this.interact()
           break
         case 'KeyV':
-          if (!e.repeat) this.cycleVehicleCamera()
+          // In a vehicle: change camera; on foot: melee
+          if (!e.repeat) {
+            if (this.vehicle) this.cycleVehicleCamera()
+            else this.melee()
+          }
           break
         case 'KeyQ':
           if (!e.repeat) this.throwGrenade()
@@ -1558,7 +1680,7 @@ export class BattlefieldGame {
     if (vehicle.kind === 'car') return 'Drive battle car'
     if (vehicle.kind === 'tank') return 'Drive tank'
     if (vehicle.kind === 'mech') return 'Pilot the combat mech'
-    return seat === 0 ? 'Fly helicopter (pilot seat)' : seat === 1 ? 'Board helicopter (gunner — nose gun)' : 'Board helicopter (door gunner — your own weapons)'
+    return seat === 0 ? 'Fly helicopter (pilot — nose gun and missiles)' : seat === 1 ? 'Board helicopter (co-pilot — your own weapons)' : 'Board helicopter (door gunner — your own weapons)'
   }
 
   /** Eye position of a seat, in the vehicle's local space (a tank's gunner sight turns with the turret). */
@@ -1605,8 +1727,8 @@ export class BattlefieldGame {
         vehicle: 'heli',
         seat,
         message: seat === 0
-          ? 'You are the pilot (pilots can\'t shoot). SPACE spins up the rotor, W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, V camera, E to get out.'
-          : seat === 1 ? 'Gunner seat: the nose gun follows your aim — LMB fires. E to get out.' : 'Door gunner: lean out of the cabin door — aim with the mouse and shoot. E to get out.',
+          ? 'PILOT: SPACE spins up the rotor, W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll. Mouse aims — LMB nose machine gun, RMB missiles. V camera, E to get out.'
+          : seat === 1 ? 'Co-pilot: aim with the mouse and shoot with your own weapons. E to get out.' : 'Door gunner: lean out of the cabin door — aim with the mouse and shoot. E to get out.',
       })
     } else if (vehicle.kind === 'mech') {
       this.carSpeed = 0
@@ -2256,7 +2378,7 @@ export class BattlefieldGame {
   }
 
   /**
-   * The helicopter's gunner: the nose gun swings round to whatever the crosshair is on (within its arc under the
+   * The helicopter's pilot: the nose gun swings round to whatever the crosshair is on (within its arc under the
    * nose) and fires while the left button is held.
    */
   private updateHeliGun(heli: Vehicle, dt: number) {
@@ -2273,6 +2395,24 @@ export class BattlefieldGame {
     heli.aimYaw += THREE.MathUtils.clamp(wrap(wantYaw - heli.aimYaw), -turn, turn)
     heli.aimPitch += THREE.MathUtils.clamp(wantPitch - heli.aimPitch, -turn, turn)
     this.carGunCooldown = Math.max(0, this.carGunCooldown - dt)
+    // Missiles from the wing pods, left and right in turn, at what the crosshair is on
+    const now = performance.now()
+    const salvo = this.heliSalvo
+    if (salvo.left === 0 && now > salvo.reloadUntil) salvo.left = HELI_SALVO
+    setGameState({ cannon: salvo.left > 0 ? 1 : Math.round((1 - (salvo.reloadUntil - now) / (HELI_SALVO_RELOAD * 1000)) * 50) / 50 })
+    if (this.mouse.aiming && salvo.left > 0 && now >= salvo.next && heli.spin > 20) {
+      const pod = heli.object.localToWorld(HELI_PODS[(HELI_SALVO - salvo.left) % 2].clone())
+      const to = aim.clone()
+      const ground = heightAt(to.x, to.z)
+      if (to.y < ground) to.y = ground
+      this.match.net.sendFire('rocket', [pod.x, pod.y, pod.z], [to.x, to.y, to.z])
+      this.projectiles.missile(pod, () => to, () => this.explodeAt(to, 'rocket'), false)
+      this.projectiles.muzzleFlash(pod, to.clone().sub(pod).normalize(), 2)
+      this.audio.shot('launch', pod)
+      salvo.left--
+      salvo.next = now + HELI_ROCKET_GAP * 1000
+      if (salvo.left === 0) salvo.reloadUntil = now + HELI_SALVO_RELOAD * 1000
+    }
     if (!this.mouse.shooting || this.carGunCooldown > 0) return
     this.carGunCooldown = HELI_GUN.fireRate
     const muzzle = this.fleet.carMuzzle(heli, new THREE.Vector3())
@@ -2521,7 +2661,7 @@ export class BattlefieldGame {
     const vehicle = this.vehicle
     setGameState({
       current: this.arsenal.kind,
-      carGun: (vehicle?.kind === 'car' && this.seat === 0) || (vehicle?.kind === 'heli' && this.seat === 1),
+      carGun: (vehicle?.kind === 'car' || vehicle?.kind === 'heli') && this.seat === 0,
       grenades: this.arsenal.reserve.grenade ?? 0,
       vehicleHp: vehicle ? Math.round((vehicle.hp / VEHICLE_MAX_HP[vehicle.kind]) * 100) / 100 : 1,
       weaponName: def?.name ?? '',
@@ -2596,14 +2736,15 @@ export class BattlefieldGame {
       this.arsenal.tick(dt)
       this.grenadeCooldown = Math.max(0, this.grenadeCooldown - dt)
       this.throwTimer = Math.max(0, this.throwTimer - dt)
+      this.meleeTimer = Math.max(0, this.meleeTimer - dt)
       // Hand weapons: on foot and in a helicopter's passenger seats. Pilots can't shoot; car drivers use the
       // roof gatling, tank drivers the cannon.
-      const canShoot = !this.dead && !this.transition && !this.turret && this.throwTimer <= 0 && (!this.vehicle || (this.vehicle.kind === 'heli' && this.seat >= 2))
+      const canShoot = !this.dead && !this.transition && !this.turret && this.throwTimer <= 0 && (!this.vehicle || (this.vehicle.kind === 'heli' && this.seat >= 1))
       const driving = this.vehicle && this.seat === 0 && !this.transition && !this.dead ? this.vehicle : null
       if (driving?.kind === 'car') this.updateCarGun(driving, dt)
       if (driving?.kind === 'tank') this.updateTankGun(driving, dt)
       if (driving?.kind === 'mech') this.updateMechGun(driving, dt)
-      if (this.vehicle?.kind === 'heli' && this.seat === 1 && !this.transition && !this.dead) this.updateHeliGun(this.vehicle, dt)
+      if (driving?.kind === 'heli') this.updateHeliGun(driving, dt)
       const scoped = this.updateZoom(realDt, canShoot)
       const launcherInHand = this.updateLauncher(realDt, canShoot)
       if (canShoot && !launcherInHand) {
@@ -2628,6 +2769,7 @@ export class BattlefieldGame {
       this.lastShotCount = this.arsenal.shotCount
       this.syncHudState()
       this.pruneKillFeed()
+      if (gameState.announcement || this.announceQueue.length) this.nextAnnouncement()
       this.weaponSounds(canShoot)
       if (now - this.lastRadarAt >= 120) {
         this.lastRadarAt = now

@@ -4,6 +4,7 @@ import { loadModel, toStandardMaterial } from './assets'
 import { heightAt } from './terrain'
 import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
 import { createMechRig, type MechRig } from './mechs'
+import { trackLoad } from './loading'
 
 /**
  * Each team's motor pool: FLEET_SIZE helicopters on the base's landing area and FLEET_SIZE battle cars parked
@@ -31,6 +32,9 @@ const GATLING_URL = '/models/battle_car_gatling.glb'
 const TANK_HULL_URL = '/models/tank_hull.glb'
 const TANK_TURRET_URL = '/models/tank_turret.glb'
 const TANK_GUN_URL = '/models/tank_gun.glb'
+/** The tank's tracks (one link model, laid round each loop) and road wheels, and where they sit. */
+const TANK_RUNNING_URL = '/models/tank_running.glb'
+const TANK_RUNNING_JSON = '/models/tank_running.json'
 
 /**
  * The attack helicopter ("Hind Attack Helicopter" by Ashley Aslett, CC-BY 4.0, markings removed). Measured at
@@ -490,6 +494,44 @@ export function createFleet(): Fleet {
     surfaces.tank = hullPieces.map((p) => new THREE.Mesh(p.geometry, surfaceMaterial))
   }).catch((error) => console.error('[vehicles] tank model failed to load:', error))
 
+  // The tracks and road wheels move: each link slides round its loop towards the next link's place, each wheel
+  // turns on its axle, the two sides separately (a tank turning on the spot runs them in opposite directions)
+  interface Pose { p: THREE.Vector3; q: THREE.Quaternion }
+  interface Running {
+    links: THREE.InstancedMesh[]; loops: Record<'left' | 'right', Pose[]>; pitch: number; step: number
+    wheels: Array<{ meshes: THREE.InstancedMesh[]; spots: Array<{ matrix: THREE.Matrix4; center: THREE.Vector3; radius: number; side: 'left' | 'right' }> }>
+  }
+  let running: Running | null = null
+  const tracks = new Map<Vehicle, { left: number; right: number; yaw: number }>()
+  for (const v of tanks) tracks.set(v, { left: 0, right: 0, yaw: v.object.rotation.y })
+  void Promise.all([loadModel(TANK_RUNNING_URL), trackLoad(TANK_RUNNING_JSON, fetch(TANK_RUNNING_JSON).then((r) => r.json()))]).then(([gltf, layout]) => {
+    const root = gltf.scene
+    root.updateMatrixWorld(true)
+    const piecesOf = (name: string) => {
+      const node = root.getObjectByName(name)
+      return node ? bakePieces(node, 1) : []
+    }
+    const toPose = (m: number[]): Pose => {
+      const matrix = new THREE.Matrix4().fromArray(m)
+      const p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3()
+      matrix.decompose(p, q, sc)
+      return { p, q }
+    }
+    const perTank = layout.links.left.length + layout.links.right.length
+    const wheelGroups = new Map<number, Running['wheels'][number]['spots']>()
+    for (const w of layout.wheels as Array<{ mesh: number; matrix: number[]; center: number[]; radius: number; side: 'left' | 'right' }>) {
+      if (!wheelGroups.has(w.mesh)) wheelGroups.set(w.mesh, [])
+      wheelGroups.get(w.mesh)!.push({ matrix: new THREE.Matrix4().fromArray(w.matrix), center: new THREE.Vector3(...w.center), radius: w.radius, side: w.side })
+    }
+    running = {
+      links: piecesOf('link').map((p) => makeInstanced(p, tanks.length * perTank, false, group)),
+      loops: { left: layout.links.left.map(toPose), right: layout.links.right.map(toPose) },
+      pitch: layout.pitch,
+      step: layout.forward === 1 ? 1 : -1,
+      wheels: [...wheelGroups].map(([mesh, spots]) => ({ meshes: piecesOf(`wheel_${mesh}`).map((p) => makeInstanced(p, tanks.length * spots.length, false, group)), spots })),
+    }
+  }).catch((error) => console.error('[vehicles] tank tracks failed to load:', error))
+
   // ---- Per-frame ----
   const m = new THREE.Matrix4(), part = new THREE.Matrix4(), spinM = new THREE.Matrix4(), toHub = new THREE.Matrix4(), fromHub = new THREE.Matrix4()
   const wheelLocal = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), ws = new THREE.Vector3(), yAxis = new THREE.Vector3(0, 1, 0), xAxis = new THREE.Vector3(1, 0, 0)
@@ -591,6 +633,13 @@ export function createFleet(): Fleet {
       } else if (v.kind === 'tank') {
         if (v !== localDriver) v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
         v.gunRecoil = Math.max(0, v.gunRecoil - dt * 1.4)
+        // How far each track has run: forward speed, plus / minus the turn (the left track is at +x)
+        const track = tracks.get(v)!
+        const yawRate = Math.atan2(Math.sin(v.object.rotation.y - track.yaw), Math.cos(v.object.rotation.y - track.yaw)) / Math.max(dt, 1e-3)
+        track.yaw = v.object.rotation.y
+        const half = TANK_WIDTH * 0.37
+        track.left += (v.spin - yawRate * half) * dt
+        track.right += (v.spin + yawRate * half) * dt
       } else if (v.kind === 'mech') {
         if (v !== localDriver) v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
         v.gunRecoil = Math.max(0, v.gunRecoil - dt * 6)
@@ -662,6 +711,42 @@ export function createFleet(): Fleet {
         n++
       }
       finish([...tankModel.hull, ...tankModel.turret, ...tankModel.gun], n)
+    }
+    if (running) {
+      const gear = running
+      let n = 0
+      const lp = new THREE.Vector3(), lq = new THREE.Quaternion(), local = new THREE.Matrix4(), one = new THREE.Vector3(1, 1, 1)
+      let slot = 0
+      const wheelSlots = gear.wheels.map(() => 0)
+      for (const v of tanks) {
+        if (v.object.position.distanceToSquared(camera) > VISIBLE_DISTANCE ** 2) continue
+        const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
+        const track = tracks.get(v)!
+        for (const side of ['left', 'right'] as const) {
+          const loop = gear.loops[side]
+          const count = loop.length
+          const u = (side === 'left' ? track.left : track.right) / gear.pitch
+          const k = Math.floor(u), f = u - k
+          for (let i = 0; i < count; i++) {
+            const a = loop[(((i + gear.step * k) % count) + count) % count]
+            const b = loop[(((i + gear.step * (k + 1)) % count) + count) % count]
+            lp.lerpVectors(a.p, b.p, f)
+            lq.slerpQuaternions(a.q, b.q, f)
+            local.compose(lp, lq, one)
+            setInstances(gear.links, slot++, part.multiplyMatrices(v.object.matrix, local), tint)
+          }
+        }
+        gear.wheels.forEach((group, gi) => {
+          for (const spot of group.spots) {
+            const angle = (spot.side === 'left' ? track.left : track.right) / spot.radius
+            local.makeTranslation(spot.center.x, spot.center.y, spot.center.z).multiply(spinM.makeRotationX(angle)).multiply(fromHub.makeTranslation(-spot.center.x, -spot.center.y, -spot.center.z)).multiply(spot.matrix)
+            setInstances(group.meshes, wheelSlots[gi]++, part.multiplyMatrices(v.object.matrix, local), tint)
+          }
+        })
+        n++
+      }
+      finish(gear.links, slot)
+      gear.wheels.forEach((group, gi) => finish(group.meshes, wheelSlots[gi]))
     }
 
     const near = carNear

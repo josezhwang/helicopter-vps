@@ -78,6 +78,13 @@ export interface GameState {
   speedKmh: number
   /** Player health — starts at 100. */
   health: number
+  /** Energy shield (0..100): takes hits first, recharges after a moment out of fire. */
+  shield: number
+  /** Counts shield hits (the HUD flashes on each). */
+  shieldHits: number
+  /** Big centre-screen callout (DOUBLE KILL…) and a counter so the same one can show twice. */
+  announcement: string
+  announceId: number
   weaponName: string
   /** True once either team steals the other's gem: result screen shows. */
   finished: boolean
@@ -145,6 +152,10 @@ const INITIAL_STATE: GameState = {
   rotorRpm: 0,
   speedKmh: 0,
   health: 100,
+  shield: 100,
+  shieldHits: 0,
+  announcement: '',
+  announceId: 0,
   weaponName: 'Primary Gun',
   finished: false,
   message: 'Connecting to the battle…',

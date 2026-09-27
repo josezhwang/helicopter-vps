@@ -3,14 +3,18 @@ import { BattlefieldGame } from './BattlefieldGame'
 import { Multiplayer } from './net'
 import { resetGameState, setGameState } from './state'
 import { QUALITIES, QUALITY_LABEL, loadQuality, type Quality } from './world/graphics'
+import { loadingProgress } from './world/loading'
 import { Hud } from './ui/Hud'
 
 export function Game({ roomId, token }: { roomId: string; token: string }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState('')
   const [ready, setReady] = useState(false)
+  /** 0..1 while the battlefield's models and textures load; null once everything is in. */
+  const [loading, setLoading] = useState<number | null>(0)
   const [quality, setQuality] = useState<Quality>(loadQuality)
   const gameRef = useRef<BattlefieldGame | null>(null)
+  const pollRef = useRef(0)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -27,12 +31,23 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
         gameRef.current = game
         game.start()
         setReady(true)
+        // Hold the loading screen until every model and texture has arrived
+        const poll = window.setInterval(() => {
+          const progress = loadingProgress()
+          if (progress.done) {
+            window.clearInterval(poll)
+            setLoading(null)
+          } else {
+            setLoading(progress.fraction)
+          }
+        }, 200)
+        pollRef.current = poll
       },
       onPlayer: (player) => game?.upsertPlayer(player),
       onLeave: (id) => game?.removePlayer(id),
       onState: (id, state) => game?.applyRemoteState(id, state),
       onEnd: (winner) => game?.endMatch(winner),
-      onHp: (id, hp, by) => game?.applyHp(id, hp, by),
+      onHp: (id, hp, by, shield) => game?.applyHp(id, hp, by, shield),
       onKilled: (id, by, how) => game?.playerKilled(id, by, how),
       onRespawn: (id) => game?.playerRespawned(id),
       onShot: (id, to, weapon) => game?.remoteShot(id, to, weapon),
@@ -58,6 +73,7 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
       net.close()
       game?.dispose()
       gameRef.current = null
+      window.clearInterval(pollRef.current)
     }
   }, [roomId, token])
 
@@ -78,6 +94,18 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
               {QUALITY_LABEL[q].toUpperCase()}
             </button>
           ))}
+        </div>
+      )}
+      {ready && !error && loading !== null && (
+        <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'radial-gradient(ellipse at center, rgba(14, 30, 48, 0.97), rgba(3, 7, 12, 1))', color: '#e8f8ff', fontFamily: 'monospace', zIndex: 20 }}>
+          <div style={{ display: 'grid', justifyItems: 'center', gap: 16, width: 'min(520px, 80vw)' }}>
+            <div style={{ fontSize: 26, letterSpacing: 6, color: '#8fd0ff' }}>DEPLOYING</div>
+            <div style={{ fontSize: 14, opacity: 0.8 }}>Loading the battlefield — models, textures, sky…</div>
+            <div style={{ width: '100%', height: 10, background: 'rgba(143, 208, 255, 0.15)', border: '1px solid rgba(143, 208, 255, 0.5)', borderRadius: 5, overflow: 'hidden' }}>
+              <div style={{ width: `${Math.round(loading * 100)}%`, height: '100%', background: 'linear-gradient(90deg, #3fa4ff, #8fe8ff)', transition: 'width 200ms ease' }} />
+            </div>
+            <div style={{ fontSize: 14, color: '#b9d4ea' }}>{Math.round(loading * 100)}%</div>
+          </div>
         </div>
       )}
       {(!ready || error) && (

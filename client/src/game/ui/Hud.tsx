@@ -19,7 +19,45 @@ const FLASH_CSS = `
 @keyframes hud-damage { from { opacity: 0.55 } to { opacity: 0 } }
 @keyframes hud-arrow { 0% { opacity: 0 } 12% { opacity: 1 } 100% { opacity: 0 } }
 @keyframes hud-feed { from { opacity: 0; transform: translateX(24px) } to { opacity: 1; transform: none } }
+@keyframes hud-shield-empty { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0.25 } }
+@keyframes hud-announce { 0% { opacity: 0; transform: translateX(-50%) scale(1.7) } 9% { opacity: 1; transform: translateX(-50%) scale(1) } 78% { opacity: 1; transform: translateX(-50%) scale(1) } 100% { opacity: 0; transform: translateX(-50%) scale(0.96) } }
 `
+
+/** Angled ends, like a visor readout. */
+const METER_SHAPE = 'polygon(0 0, 100% 0, 97% 100%, 3% 100%)'
+
+/**
+ * The energy shield across the top of the screen (it drains from both ends toward the middle and blinks red when
+ * it's down), with the health underneath as ten pips.
+ */
+function ShieldMeter({ shield, health }: { shield: number; health: number }) {
+  const down = shield <= 0
+  const pips = Math.ceil(Math.max(0, health) / 10)
+  return (
+    <div style={{ width: 'min(380px, 60vw)', display: 'grid', gap: 4, justifyItems: 'center' }}>
+      <div style={{ width: '100%', height: 18, padding: 2, boxSizing: 'border-box', clipPath: METER_SHAPE, background: down ? 'rgba(255, 70, 50, 0.85)' : 'rgba(140, 215, 255, 0.55)', animation: down ? 'hud-shield-empty 520ms linear infinite' : undefined }}>
+        <div style={{ position: 'relative', height: '100%', clipPath: METER_SHAPE, background: 'rgba(4, 12, 22, 0.82)', display: 'flex', justifyContent: 'center' }}>
+          <div style={{ width: `${Math.max(0, Math.min(100, shield))}%`, height: '100%', background: 'linear-gradient(180deg, #d8f6ff 0%, #56c6ff 45%, #1f86d8 100%)', boxShadow: '0 0 12px rgba(90, 200, 255, 0.9)', transition: 'width 200ms linear' }} />
+          <div style={{ position: 'absolute', inset: 0, background: 'repeating-linear-gradient(90deg, transparent 0 17px, rgba(4, 12, 22, 0.7) 17px 19px)' }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 3 }}>
+        {Array.from({ length: 10 }, (_, i) => (
+          <div key={i} style={{ width: 16, height: 5, transform: 'skewX(-20deg)', background: i < pips ? (health > 30 ? '#8ff0a8' : '#ff6a55') : 'rgba(255, 255, 255, 0.14)', boxShadow: i < pips ? `0 0 5px ${health > 30 ? 'rgba(120, 255, 160, 0.6)' : 'rgba(255, 80, 60, 0.8)'}` : undefined }} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** DOUBLE KILL, KILLING SPREE…: big in the middle of the screen for a moment. */
+function Announcement({ text }: { text: string }) {
+  return (
+    <div style={{ position: 'absolute', left: '50%', top: '24%', transform: 'translateX(-50%)', whiteSpace: 'nowrap', font: '800 40px monospace', letterSpacing: 5, color: '#fff4cf', textShadow: '0 0 20px rgba(255, 185, 60, 0.95), 0 2px 0 #000', animation: 'hud-announce 1900ms ease-out forwards' }}>
+      {text}
+    </div>
+  )
+}
 
 /** A red arc round the crosshair on the side the damage came from. */
 function DamageArrow({ angle }: { angle: number }) {
@@ -166,15 +204,15 @@ function controlsHint(state: GameState) {
   if (state.onGun) return 'MACHINE GUN — mouse aim · LMB fire (slow, heavy rounds) · E leave the gun'
   if (state.vehicle === 'heli') {
     return state.seat === 0
-      ? 'PILOT — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · V view · E get out (pilots can\'t shoot)'
+      ? 'PILOT — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · mouse aim · LMB machine gun · RMB missiles · V view · E exit'
       : state.seat === 1
-        ? 'GUNNER — mouse aims the nose gun · LMB fire · E get out'
+        ? 'CO-PILOT — mouse aim · LMB fire · F switch weapon · R reload · E get out'
         : 'DOOR GUNNER — mouse aim · LMB fire out of the door · F switch weapon · R reload · E get out'
   }
   if (state.vehicle === 'car') return 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse aims the roof gatling · LMB fire · V view · E exit'
   if (state.vehicle === 'tank') return 'TANK — W/S drive · A/D turn the hull · mouse aims the turret · LMB fire the cannon · V gunner sight · E exit'
   if (state.vehicle === 'mech') return 'MECH — W/S walk · Shift run · A/D turn · SPACE jump-jets · mouse aims the torso · LMB autocannon · RMB rocket salvo · V view · E exit'
-  return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · Q grenade · G pick up / drop · E vehicle / machine gun · LMB shoot · RMB aim'
+  return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · Q grenade · V melee · G pick up / drop · E vehicle / machine gun · LMB shoot · RMB aim'
 }
 
 export function Hud() {
@@ -193,11 +231,15 @@ export function Hud() {
       {!state.dead && (state.cannon >= 0 || state.gunX >= 0) && <TankSight state={state} />}
       {!state.dead && !state.scoped && <Crosshair />}
       {!state.dead && <LockOn state={state} />}
-      {state.damageTaken > 0 && state.damageDir !== null && !state.dead && <DamageArrow key={`arrow-${state.damageTaken}`} angle={state.damageDir} />}
+      {state.damageTaken + state.shieldHits > 0 && state.damageDir !== null && !state.dead && <DamageArrow key={`arrow-${state.damageTaken + state.shieldHits}`} angle={state.damageDir} />}
       {state.hitsLanded > 0 && <HitMarker key={`hit-${state.hitsLanded}`} />}
       {state.damageTaken > 0 && (
         <div key={`dmg-${state.damageTaken}`} style={{ position: 'absolute', inset: 0, boxShadow: 'inset 0 0 160px 40px rgba(220, 30, 20, 0.9)', animation: 'hud-damage 450ms ease-out forwards' }} />
       )}
+      {state.shieldHits > 0 && (
+        <div key={`shield-${state.shieldHits}`} style={{ position: 'absolute', inset: 0, boxShadow: 'inset 0 0 150px 34px rgba(80, 190, 255, 0.85)', animation: 'hud-damage 380ms ease-out forwards' }} />
+      )}
+      {state.announcement && !state.finished && <Announcement key={`announce-${state.announceId}`} text={state.announcement} />}
       {state.dead && !state.finished && (
         <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'rgba(60, 5, 5, 0.45)', color: '#ffd6d2', fontSize: 30, fontWeight: 700, letterSpacing: 1.5, textShadow: '0 0 16px rgba(255, 60, 40, 0.8)' }}>
           ELIMINATED — RESPAWNING…
@@ -214,11 +256,6 @@ export function Hud() {
         <Roster players={state.players} />
         <KillFeed entries={state.killFeed} />
       </div>
-      {!state.connected && !state.finished && (
-        <div style={{ ...panel, position: 'absolute', left: '50%', top: 64, transform: 'translateX(-50%)', color: '#ffd98f' }}>
-          Connection lost — reconnecting…
-        </div>
-      )}
 
       <div
         style={{
@@ -255,7 +292,9 @@ export function Hud() {
         {state.onGun ? (
           <div style={{ fontSize: 18, color: '#ffb35a' }}>MACHINE GUN</div>
         ) : state.carGun ? (
-          <div style={{ fontSize: 18, color: '#ffb35a' }}>{state.vehicle === 'heli' ? 'NOSE GUN' : 'ROOF GATLING'}</div>
+          <div style={{ fontSize: 18, color: state.vehicle === 'heli' && state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
+            {state.vehicle === 'heli' ? `NOSE GUN · ${state.cannon >= 1 ? 'MISSILES READY' : `MISSILES RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : 'ROOF GATLING'}
+          </div>
         ) : state.vehicle === 'mech' ? (
           <div style={{ fontSize: 18, color: state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
             AUTOCANNON · {state.cannon >= 1 ? 'ROCKETS READY' : `ROCKETS RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}
@@ -307,23 +346,24 @@ export function Hud() {
         {state.pickupPrompt && <div style={{ color: '#b6f0a0' }}>[G] {state.pickupPrompt}</div>}
       </div>
 
-      <div
-        style={{
-          position: 'absolute',
-          left: '50%',
-          top: 14,
-          transform: 'translateX(-50%)',
-          maxWidth: 620,
-          padding: '8px 14px',
-          background: 'rgba(6, 10, 18, 0.6)',
-          border: '1px solid rgba(120, 180, 255, 0.25)',
-          borderRadius: 8,
-          color: '#eaf2ff',
-          fontSize: 14,
-          textAlign: 'center',
-        }}
-      >
-        {state.message}
+      {/* Top centre: the shield and health, then messages under them */}
+      <div style={{ position: 'absolute', left: '50%', top: 12, transform: 'translateX(-50%)', display: 'grid', justifyItems: 'center', gap: 8 }}>
+        {!state.dead && !state.finished && <ShieldMeter shield={state.shield} health={state.health} />}
+        <div
+          style={{
+            maxWidth: 620,
+            padding: '8px 14px',
+            background: 'rgba(6, 10, 18, 0.6)',
+            border: '1px solid rgba(120, 180, 255, 0.25)',
+            borderRadius: 8,
+            color: '#eaf2ff',
+            fontSize: 14,
+            textAlign: 'center',
+          }}
+        >
+          {state.message}
+        </div>
+        {!state.connected && !state.finished && <div style={{ ...panel, color: '#ffd98f' }}>Connection lost — reconnecting…</div>}
       </div>
 
       {state.finished && (

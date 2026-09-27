@@ -56,11 +56,55 @@ export interface Avatar {
   fire: () => THREE.Vector3
   /** A hit landed: flinch. */
   flinch: () => void
+  /** Their energy shield soaked a hit: a shimmer over the body (`strength` > 1 as it breaks). */
+  shieldFlare: (strength?: number) => void
   /** Throw a grenade (the arm swings over). */
   throwGrenade: () => void
   /** The weapon in their hands (null = none). */
   setWeapon: (kind: WeaponKind | null) => void
   dispose: () => void
+}
+
+/** The energy-shield shimmer: a slightly puffed-out, rim-lit copy of the body, added on top of it. */
+function shieldMaterial(push: number) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uAmount: { value: 0 }, uPush: { value: push }, uTime: { value: 0 }, uColor: { value: new THREE.Color(0x7fd8ff) } },
+    vertexShader: /* glsl */ `
+      #include <common>
+      #include <skinning_pars_vertex>
+      uniform float uPush;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      varying float vHeight;
+      void main() {
+        #include <beginnormal_vertex>
+        #include <skinbase_vertex>
+        #include <skinnormal_vertex>
+        #include <defaultnormal_vertex>
+        #include <begin_vertex>
+        transformed += normalize(objectNormal) * uPush;
+        #include <skinning_vertex>
+        #include <project_vertex>
+        vNormal = normalize(transformedNormal);
+        vView = -mvPosition.xyz;
+        vHeight = (modelMatrix * vec4(transformed, 1.0)).y;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uAmount;
+      uniform float uTime;
+      uniform vec3 uColor;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      varying float vHeight;
+      void main() {
+        float rim = 1.0 - abs(dot(normalize(vNormal), normalize(vView)));
+        float ripple = 0.7 + 0.3 * sin(uTime * 38.0 - vHeight * 26.0);
+        gl_FragColor = vec4(uColor * (pow(rim, 1.7) * 1.6 + 0.15) * ripple * uAmount, 1.0);
+      }`,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  })
 }
 
 let flashTexture: THREE.Texture | null = null
@@ -97,6 +141,11 @@ interface RobotAsset {
 let robotAsset: Promise<RobotAsset | null> | null = null
 
 const boneOf = (track: THREE.KeyframeTrack) => track.name.slice(0, track.name.lastIndexOf('.'))
+
+/** Start fetching the robot now (so it's in before the battle starts, even with nobody else around). */
+export function preloadRobot() {
+  void loadRobot()
+}
 
 /** Loaded once and shared; every avatar gets its own skeleton clone. */
 function loadRobot(): Promise<RobotAsset | null> {
@@ -356,12 +405,49 @@ export function createAvatar(name: string, team: Team): Avatar {
     if (mixer && deathTime < DEATH_FALL + 0.2) mixer.update(dt)
   }
 
+  /** The shield shimmer's shells over each body mesh (made on the first hit), and how bright it still is. */
+  let shells: THREE.Mesh[] | null = null
+  let shellMaterial: THREE.ShaderMaterial | null = null
+  let shimmer = 0
+  function makeShells() {
+    if (shells || !robotMeshes.length) return
+    // About 3.5 cm out from the body, in the meshes' own units
+    const size = robotMeshes[0].getWorldScale(new THREE.Vector3()).x || 1
+    shellMaterial = shieldMaterial(0.035 / size)
+    shells = robotMeshes.map((mesh) => {
+      let shell: THREE.Mesh
+      if ((mesh as THREE.SkinnedMesh).isSkinnedMesh) {
+        const skinned = mesh as THREE.SkinnedMesh
+        const copy = new THREE.SkinnedMesh(skinned.geometry, shellMaterial!)
+        copy.bind(skinned.skeleton, skinned.bindMatrix)
+        shell = copy
+      } else {
+        shell = new THREE.Mesh(mesh.geometry, shellMaterial!)
+      }
+      shell.position.copy(mesh.position)
+      shell.quaternion.copy(mesh.quaternion)
+      shell.scale.copy(mesh.scale)
+      shell.raycast = noRaycast
+      shell.frustumCulled = false
+      shell.renderOrder = 2
+      shell.visible = false
+      mesh.parent!.add(shell)
+      return shell
+    })
+  }
+
   const blend = (target: number, current: number, k: number) => current + (target - current) * k
   return {
     group,
     carriedGem,
     update(dt, speed, pitch, distance, airborne = false) {
       if (flash.visible && performance.now() > flashUntil) flash.visible = false
+      if (shells && shellMaterial && (shimmer > 0 || shells[0].visible)) {
+        shimmer = Math.max(0, shimmer - dt * 2.6)
+        shellMaterial.uniforms.uAmount.value = Math.min(1.8, shimmer)
+        shellMaterial.uniforms.uTime.value = performance.now() / 1000
+        for (const shell of shells) shell.visible = shimmer > 0
+      }
       if (carriedGem.visible) carriedGem.rotation.y += dt * 2.5
       const near = distance < DETAIL_DISTANCE
       if (near !== detailed) {
@@ -438,6 +524,11 @@ export function createAvatar(name: string, team: Team): Avatar {
     flinch() {
       playOnce(hitAction, 1.3)
     },
+    shieldFlare(strength = 1) {
+      if (deathTime >= 0) return
+      makeShells()
+      shimmer = Math.max(shimmer, strength)
+    },
     throwGrenade() {
       playOnce(throwAction, 1.6)
     },
@@ -458,6 +549,7 @@ export function createAvatar(name: string, team: Team): Avatar {
     dispose() {
       disposed = true
       mixer?.stopAllAction()
+      shellMaterial?.dispose()
       // The robot's geometry, textures and team materials are shared between avatars; only free our own
       for (const object of own) {
         // Sprites share one built-in geometry, and the flash texture is shared by every avatar

@@ -9,7 +9,7 @@ import type { Surface } from './projectiles'
  * Nothing plays until the first click (browsers only allow audio after the player does something).
  */
 export type ShotSound = 'pistol' | 'rifle' | 'heavy' | 'sniper' | 'plasma' | 'mg' | 'gatling' | 'cannon' | 'launch'
-export type UiSound = 'reload' | 'reloaded' | 'empty' | 'pickup' | 'pin' | 'hit' | 'kill' | 'hurt' | 'switch'
+export type UiSound = 'reload' | 'reloaded' | 'empty' | 'pickup' | 'pin' | 'hit' | 'kill' | 'hurt' | 'switch' | 'shield' | 'shieldDown' | 'recharge' | 'melee' | 'announce'
 
 interface ShotRecipe {
   /** High crack, mid body, low thump and the echo tail: level, filter frequency (Hz), decay (s) of each. */
@@ -293,6 +293,24 @@ export class GameAudio {
       case 'kill':
         this.tone(ctx, input, t, 'sine', 1500, 1450, 0.25, 0.001, 0.05)
         this.tone(ctx, input, t + 0.07, 'sine', 2100, 2050, 0.25, 0.001, 0.09)
+        break
+      case 'shield':
+        this.tone(ctx, input, t, 'triangle', 900, 1400, 0.18, 0.002, 0.12)
+        this.burst(ctx, input, t, 'highpass', 5000, 0.2, 0.001, 0.06)
+        break
+      case 'shieldDown':
+        this.tone(ctx, input, t, 'square', 700, 350, 0.22, 0.002, 0.3)
+        break
+      case 'recharge':
+        this.tone(ctx, input, t, 'sine', 400, 1600, 0.16, 0.05, 0.7)
+        break
+      case 'melee':
+        this.burst(ctx, input, t, 'bandpass', 900, 0.5, 0.002, 0.12, 1)
+        break
+      case 'announce':
+        this.tone(ctx, input, t, 'sawtooth', 220, 220, 0.12, 0.01, 0.35)
+        this.tone(ctx, input, t + 0.12, 'sawtooth', 330, 330, 0.12, 0.01, 0.35)
+        this.tone(ctx, input, t + 0.24, 'sawtooth', 440, 440, 0.14, 0.01, 0.5)
         break
       case 'hurt':
         this.tone(ctx, input, t, 'sine', 110, 55, 0.6, 0.002, 0.16)

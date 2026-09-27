@@ -54,6 +54,10 @@ interface Vitals {
   lastCannonAt: number
   /** A mech's rocket salvo: when each of the last rockets left. */
   mechRockets: number[]
+  /** Energy shield on top of health: takes damage first, recharges once you've not been hit for a moment. */
+  shield: number
+  hurtAt: number
+  lastMeleeAt: number
   respawnTimer?: NodeJS.Timeout
 }
 
@@ -81,10 +85,10 @@ type BlastKind = 'shell' | 'rocket' | 'grenade' | 'barrel'
  * tanks take `tank` times that). Falls off towards the edge.
  */
 const BLASTS: Record<BlastKind, { radius: number; player: number; vehicle: number; tank: number }> = {
-  shell: { radius: 7, player: 120, vehicle: 520, tank: 0.8 },
-  rocket: { radius: 6, player: 110, vehicle: 700, tank: 1 },
-  grenade: { radius: 7, player: 115, vehicle: 170, tank: 0.35 },
-  barrel: { radius: 8, player: 100, vehicle: 260, tank: 0.5 },
+  shell: { radius: 7, player: 240, vehicle: 520, tank: 0.8 },
+  rocket: { radius: 6, player: 220, vehicle: 700, tank: 1 },
+  grenade: { radius: 7, player: 150, vehicle: 170, tank: 0.35 },
+  barrel: { radius: 8, player: 150, vehicle: 260, tank: 0.5 },
 }
 /** Projectile speeds (m/s) for shells and rockets: the blast comes when it arrives. */
 const PROJECTILE_SPEED = { shell: 260, rocket: 120 }
@@ -111,6 +115,15 @@ const SEATS = { heli: 4, car: 1, tank: 1, mech: 1 }
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
 const MAX_HP = 100
+/** Energy shields: this strong, back after SHIELD_DELAY_MS without a hit, refilling at SHIELD_RATE per second. */
+const MAX_SHIELD = 100
+const SHIELD_DELAY_MS = 4000
+const SHIELD_RATE = 45
+const SHIELD_TICK_MS = 250
+/** Melee: a quick strike at arm's length (an instant takedown from behind), no faster than MELEE_COOLDOWN_MS. */
+const MELEE_REACH = 3.2
+const MELEE_DAMAGE = 70
+const MELEE_COOLDOWN_MS = 800
 const RESPAWN_MS = 5000
 // Mirrors client/src/game/world/weapons.ts; the server never trusts client-sent damage
 const WEAPONS: Record<string, { power: number; fireRate: number; range: number }> = {
@@ -232,10 +245,26 @@ export class RealtimeService implements OnModuleDestroy {
         }
       }
     }, 30_000)
+    this.shieldTick = setInterval(() => this.rechargeShields(), SHIELD_TICK_MS)
+  }
+
+  private shieldTick?: NodeJS.Timeout
+
+  /** Shields come back once a player hasn't been hit for SHIELD_DELAY_MS. */
+  private rechargeShields() {
+    const now = Date.now()
+    for (const [roomId, room] of this.vitals) {
+      for (const [userId, vitals] of room) {
+        if (vitals.dead || vitals.shield >= MAX_SHIELD || now - vitals.hurtAt < SHIELD_DELAY_MS) continue
+        vitals.shield = Math.min(MAX_SHIELD, vitals.shield + (SHIELD_RATE * SHIELD_TICK_MS) / 1000)
+        this.broadcast(roomId, { type: 'hp', id: userId, hp: vitals.hp, shield: Math.round(vitals.shield), by: '' })
+      }
+    }
   }
 
   onModuleDestroy() {
     clearInterval(this.heartbeat)
+    clearInterval(this.shieldTick)
     for (const roomId of new Set([...this.vitals.keys(), ...this.worlds.keys()])) this.clearRoom(roomId)
     for (const ws of this.wss.clients) ws.terminate()
     this.wss.close()
@@ -275,6 +304,7 @@ export class RealtimeService implements OnModuleDestroy {
         case 'fire': this.fire(roomId, conn, message); break
         case 'throw': this.throwGrenade(roomId, conn, message); break
         case 'blast': this.grenadeBlast(roomId, conn, message); break
+        case 'melee': this.melee(roomId, conn, message); break
         case 'capture': await this.capture(roomId, conn); break
       }
     })
@@ -318,7 +348,7 @@ export class RealtimeService implements OnModuleDestroy {
     const players = roster.players.map((player) => {
       const live = room.get(player.id)
       const vitals = this.vitalsOf(roomId, player.id)
-      return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null, hp: vitals.hp, dead: vitals.dead }
+      return { ...player, team: player.id === me.id ? me.team : player.team, online: !!live, state: live?.state ?? null, hp: vitals.hp, shield: Math.round(vitals.shield), dead: vitals.dead }
     })
     const world = this.worldOf(roomId)
     this.send(ws, {
@@ -330,7 +360,7 @@ export class RealtimeService implements OnModuleDestroy {
       barrels: [...world.barrels].map(([id, b]) => ({ id, x: b.x, z: b.z, alive: b.alive })),
     })
     const myVitals = this.vitalsOf(roomId, user.id)
-    this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null, hp: myVitals.hp, dead: myVitals.dead } }, user.id)
+    this.broadcast(roomId, { type: 'player', player: { ...me, online: true, state: null, hp: myVitals.hp, shield: Math.round(myVitals.shield), dead: myVitals.dead } }, user.id)
     return { roomId, conn }
   }
 
@@ -358,7 +388,7 @@ export class RealtimeService implements OnModuleDestroy {
     let room = this.vitals.get(roomId)
     if (!room) this.vitals.set(roomId, (room = new Map()))
     let vitals = room.get(userId)
-    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0, lastMissileAt: 0, lastDropAt: 0, lastCannonAt: 0, mechRockets: [] }))
+    if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0, lastMissileAt: 0, lastDropAt: 0, lastCannonAt: 0, mechRockets: [], shield: MAX_SHIELD, hurtAt: 0, lastMeleeAt: 0 }))
     return vitals
   }
 
@@ -453,10 +483,9 @@ export class RealtimeService implements OnModuleDestroy {
     // hand weapons from neither (nor from a helicopter's pilot seat or a tank)
     const v = shooter.state.vehicle
     const driving = v?.seat === 0
-    const vehicleGun = weaponId === 'car-gun' ? '-car-' : weaponId === 'mech-cannon' ? '-mech-' : null
-    // The helicopter's nose gun belongs to its gunner (seat 1); hand weapons are for its door gunners (seats 2, 3)
-    const heliGunner = v?.seat === 1 && v.id.includes('-heli-')
-    if (weaponId === 'heli-gun' ? !heliGunner : weaponId === 'machine-gun' ? !shooter.state.gun : vehicleGun ? !(driving && v!.id.includes(vehicleGun)) : shooter.state.gun || driving || heliGunner) return
+    // Vehicle guns belong to whoever drives / flies it; hand weapons are for passengers (a helicopter's co-pilot and door gunners)
+    const vehicleGun = weaponId === 'car-gun' ? '-car-' : weaponId === 'mech-cannon' ? '-mech-' : weaponId === 'heli-gun' ? '-heli-' : null
+    if (weaponId === 'machine-gun' ? !shooter.state.gun : vehicleGun ? !(driving && v!.id.includes(vehicleGun)) : shooter.state.gun || driving) return
     const shooterVitals = this.vitalsOf(roomId, shooter.userId)
     if (shooterVitals.dead) return
     const now = Date.now()
@@ -496,11 +525,34 @@ export class RealtimeService implements OnModuleDestroy {
     this.damagePlayer(roomId, target, weapon.power, shooter.userId, weaponId)
   }
 
+  /**
+   * A melee strike on someone within arm's reach (both on foot): a heavy blow, or an instant takedown when it
+   * comes from behind them.
+   */
+  private melee(roomId: string, attacker: Connection, message: Record<string, unknown>) {
+    const target = typeof message.target === 'string' ? this.rooms.get(roomId)?.get(message.target) : undefined
+    const a = attacker.state, t = target?.state
+    if (!target || !a || !t || target.team === attacker.team || a.vehicle || a.gun || t.vehicle) return
+    const vitals = this.vitalsOf(roomId, attacker.userId)
+    const now = Date.now()
+    if (vitals.dead || this.vitalsOf(roomId, target.userId).dead || now - vitals.lastMeleeAt < MELEE_COOLDOWN_MS) return
+    if (Math.hypot(a.p[0] - t.p[0], a.p[1] - t.p[1], a.p[2] - t.p[2]) > MELEE_REACH) return
+    vitals.lastMeleeAt = now
+    // Behind them: we're on the side they're facing away from
+    const facing = [-Math.sin(t.yaw), -Math.cos(t.yaw)]
+    const behind = (a.p[0] - t.p[0]) * facing[0] + (a.p[2] - t.p[2]) * facing[1] < 0
+    this.damagePlayer(roomId, target, behind ? 1000 : MELEE_DAMAGE, attacker.userId, behind ? 'assassination' : 'melee')
+  }
+
   private damagePlayer(roomId: string, target: Connection, amount: number, by: string, how: string) {
     const vitals = this.vitalsOf(roomId, target.userId)
     if (vitals.dead || amount <= 0) return
-    vitals.hp = Math.max(0, vitals.hp - Math.round(amount))
-    this.broadcast(roomId, { type: 'hp', id: target.userId, hp: vitals.hp, by })
+    // The shield takes it first; what gets through comes off health
+    vitals.hurtAt = Date.now()
+    const absorbed = Math.min(vitals.shield, amount)
+    vitals.shield -= absorbed
+    vitals.hp = Math.max(0, vitals.hp - Math.round(amount - absorbed))
+    this.broadcast(roomId, { type: 'hp', id: target.userId, hp: vitals.hp, shield: Math.round(vitals.shield), by })
     if (vitals.hp <= 0) this.kill(roomId, target, by, how)
   }
 
@@ -509,6 +561,7 @@ export class RealtimeService implements OnModuleDestroy {
     const vitals = this.vitalsOf(roomId, target.userId)
     if (vitals.dead) return
     vitals.hp = 0
+    vitals.shield = 0
     vitals.dead = true
     this.broadcast(roomId, { type: 'hp', id: target.userId, hp: 0, by })
     this.broadcast(roomId, { type: 'killed', id: target.userId, by, how })
@@ -531,6 +584,7 @@ export class RealtimeService implements OnModuleDestroy {
     }
     vitals.respawnTimer = setTimeout(() => {
       vitals.hp = MAX_HP
+      vitals.shield = MAX_SHIELD
       vitals.dead = false
       this.broadcast(roomId, { type: 'respawn', id: target.userId })
     }, RESPAWN_MS)
@@ -623,8 +677,8 @@ export class RealtimeService implements OnModuleDestroy {
       if (!v || v.seat !== 0 || kindOf(v.id) !== 'tank' || now - vitals.lastCannonAt < TANK_RELOAD_MS * FIRE_RATE_SLACK) return
       vitals.lastCannonAt = now
       from = v.p
-    } else if (state.vehicle && kindOf(state.vehicle.id) === 'mech') {
-      // A mech's shoulder pods: salvos of up to MECH_SALVO rockets, then a reload
+    } else if (state.vehicle && (kindOf(state.vehicle.id) === 'mech' || kindOf(state.vehicle.id) === 'heli')) {
+      // A mech's shoulder pods / a helicopter pilot's wing pods: salvos of up to MECH_SALVO rockets, then a reload
       if (state.vehicle.seat !== 0) return
       const recent = vitals.mechRockets.filter((t) => now - t < MECH_SALVO_WINDOW_MS)
       if (recent.length >= MECH_SALVO || (recent.length && now - recent[recent.length - 1] < MECH_ROCKET_GAP_MS * FIRE_RATE_SLACK)) return

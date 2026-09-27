@@ -48,6 +48,8 @@ export interface NetPlayer {
   online: boolean
   state: NetState | null
   hp: number
+  /** Energy shield (0..100). */
+  shield?: number
   dead: boolean
 }
 
@@ -57,7 +59,8 @@ export interface NetHandlers {
   onLeave: (id: string) => void
   onState: (id: string, state: NetState) => void
   onEnd: (winner: Team, by: string) => void
-  onHp: (id: string, hp: number, by: string) => void
+  /** Health and shield changed (`by` is empty when the shield is just recharging; shield -1 = unknown). */
+  onHp: (id: string, hp: number, by: string, shield: number) => void
   /** `how`: the weapon id, 'missile', 'shell', 'rocket', 'grenade', 'barrel' or 'wreck'. */
   onKilled: (id: string, by: string, how: string) => void
   onRespawn: (id: string) => void
@@ -154,7 +157,7 @@ export class Multiplayer {
         case 'leave': this.handlers.onLeave(String(message.id)); break
         case 'state': this.handlers.onState(String(message.id), message.s as NetState); break
         case 'end': this.handlers.onEnd(message.winner as Team, String(message.by)); break
-        case 'hp': this.handlers.onHp(String(message.id), Number(message.hp), String(message.by)); break
+        case 'hp': this.handlers.onHp(String(message.id), Number(message.hp), String(message.by ?? ''), message.shield === undefined ? -1 : Number(message.shield)); break
         case 'killed': this.handlers.onKilled(String(message.id), String(message.by), String(message.how ?? '')); break
         case 'respawn': this.handlers.onRespawn(String(message.id)); break
         case 'shot': this.handlers.onShot(String(message.id), message.to as Vec3, String(message.w ?? 'primary')); break
@@ -214,6 +217,11 @@ export class Multiplayer {
   /** A round of ours struck a player, a vehicle's hull (and whoever is inside) or an explosive barrel. */
   sendHit(weapon: string, what: { target?: string; vehicle?: string; barrel?: string }) {
     this.send({ type: 'hit', weapon, ...what })
+  }
+
+  /** A melee strike on the player in front of us. */
+  sendMelee(target: string) {
+    this.send({ type: 'melee', target })
   }
 
   /** [E] on a vehicle with enemies aboard: pull them out. */

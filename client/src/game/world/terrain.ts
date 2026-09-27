@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { BASE_CENTER, PLATEAU_HALF, type Team } from './layout'
+import { trackLoad } from './loading'
 
 export const WORLD_SIZE = 1000
 export const HALF_WORLD = WORLD_SIZE / 2
@@ -71,7 +72,7 @@ async function loadLayerArray(urls: string[], size: number, srgb: boolean, aniso
   canvas.width = canvas.height = size
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!
   const images = await Promise.all(urls.map(async (url) => {
-    const blob = await (await fetch(url)).blob()
+    const blob = await trackLoad(url, fetch(url).then((r) => r.blob()))
     return createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })
   }))
   images.forEach((image, i) => {

@@ -32,6 +32,8 @@ export class Viewmodel {
   private current: WeaponKind | null = null
   private recoil = 0
   private switchDip = 0
+  /** Melee strike progress (1 → 0). */
+  private bashing = 0
   private aim = 0
   private models = new Map<WeaponKind, { model: THREE.Object3D; prop: Prop; poses: { hip: Pose; aim: Pose }; flash: THREE.Sprite; eject: THREE.Object3D }>()
   private flashUntil = 0
@@ -89,6 +91,11 @@ export class Viewmodel {
     return { muzzle: entry.flash.getWorldPosition(new THREE.Vector3()), eject: entry.eject.getWorldPosition(new THREE.Vector3()) }
   }
 
+  /** A melee strike: the gun butt swings forward and across. */
+  bash() {
+    this.bashing = 1
+  }
+
   /** Recoil kick, reload dip, weapon-switch dip, aiming and walking sway. Call every frame. */
   update(dt: number, opts: { recoilKick: boolean; reloading: boolean; hidden: boolean; moving: boolean; aiming: boolean; time: number }) {
     this.group.visible = !opts.hidden && !!this.current
@@ -99,6 +106,10 @@ export class Viewmodel {
     if (opts.recoilKick) this.recoil = 1
     this.recoil = Math.max(0, this.recoil - dt * (def.automatic ? 10 : 6))
     this.switchDip = Math.max(0, this.switchDip - dt * 4)
+    this.bashing = Math.max(0, this.bashing - dt * 3.2)
+    // Out fast, back slower
+    const phase = 1 - this.bashing
+    const bash = this.bashing > 0 ? (phase < 0.35 ? phase / 0.35 : 1 - (phase - 0.35) / 0.65) : 0
     this.aim = THREE.MathUtils.clamp(this.aim + (opts.aiming ? dt : -dt) * 6, 0, 1)
     const { hip, aim } = entry.poses
     const k = this.aim
@@ -106,10 +117,14 @@ export class Viewmodel {
     const reloadDip = opts.reloading ? 0.22 : 0
     const kick = (this.current === 'launcher' ? 0.25 : def.kick > 0.03 ? 0.14 : 0.06) * this.recoil
     this.group.position.set(
-      THREE.MathUtils.lerp(hip.pos.x, aim.pos.x, k),
-      THREE.MathUtils.lerp(hip.pos.y, aim.pos.y, k) + sway - reloadDip - this.switchDip * 0.3,
-      THREE.MathUtils.lerp(hip.pos.z, aim.pos.z, k) + kick,
+      THREE.MathUtils.lerp(hip.pos.x, aim.pos.x, k) - bash * 0.14,
+      THREE.MathUtils.lerp(hip.pos.y, aim.pos.y, k) + sway - reloadDip - this.switchDip * 0.3 + bash * 0.06,
+      THREE.MathUtils.lerp(hip.pos.z, aim.pos.z, k) + kick - bash * 0.32,
     )
-    this.group.rotation.set(this.recoil * Math.min(0.35, def.kick * 8) + reloadDip * 2.2, THREE.MathUtils.lerp(hip.yaw, aim.yaw, k), THREE.MathUtils.lerp(hip.roll, aim.roll, k) + this.recoil * 0.08)
+    this.group.rotation.set(
+      this.recoil * Math.min(0.35, def.kick * 8) + reloadDip * 2.2 - bash * 0.45,
+      THREE.MathUtils.lerp(hip.yaw, aim.yaw, k) + bash * 0.5,
+      THREE.MathUtils.lerp(hip.roll, aim.roll, k) + this.recoil * 0.08 + bash * 0.9,
+    )
   }
 }
