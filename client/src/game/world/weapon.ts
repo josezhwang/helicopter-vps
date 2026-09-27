@@ -40,12 +40,14 @@ export class Arsenal {
     this.reset()
   }
 
-  /** The starting loadout: handgun and primary gun, each with three magazines. */
+  /** The starting loadout: handgun and primary gun, each with three magazines, and two grenades. */
   reset() {
     this.slots = { sidearm: { kind: 'handgun', mag: WEAPONS.handgun.magSize }, long: { kind: 'primary', mag: WEAPONS.primary.magSize } }
     this.reserve = Object.fromEntries(AMMO_TYPES.map((a) => [a, 0])) as Record<AmmoType, number>
     this.reserve['9mm'] = WEAPONS.handgun.magSize * 2
     this.reserve['556'] = WEAPONS.primary.magSize * 2
+    // And two hand grenades
+    this.reserve.grenade = 2
     this.current = 'long'
     this.cancelReload()
   }

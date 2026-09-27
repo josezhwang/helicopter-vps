@@ -36,21 +36,15 @@ export class Viewmodel {
   private models = new Map<WeaponKind, { model: THREE.Object3D; prop: Prop; poses: { hip: Pose; aim: Pose }; flash: THREE.Sprite; eject: THREE.Object3D }>()
   private flashUntil = 0
 
-  constructor(private camera: THREE.PerspectiveCamera, flashTexture: THREE.Texture) {
-    this.camera.add(this.group)
+  /** `rig` follows the camera in the viewmodel's own scene (see Graphics). */
+  constructor(private camera: THREE.PerspectiveCamera, private rig: THREE.Object3D, flashTexture: THREE.Texture) {
+    this.rig.add(this.group)
     for (const kind of WEAPON_KINDS) {
       void loadProp(WEAPONS[kind].model).then((prop) => {
         const model = propGroup(prop, false)
         model.scale.setScalar(VIEW_SCALE[kind] ?? 1)
         model.traverse((node) => {
           node.frustumCulled = false
-          node.renderOrder = 1000
-          const mesh = node as THREE.Mesh
-          if (!mesh.isMesh) return
-          // Own material copies: drawn on top of the world without touching the shared ones
-          mesh.material = (mesh.material as THREE.Material).clone()
-          mesh.material.depthTest = false
-          mesh.material.depthWrite = false
         })
         const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTexture, color: kind === 'plasma' ? 0x8dff9a : 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false }))
         flash.position.copy(prop.tip)
@@ -90,6 +84,8 @@ export class Viewmodel {
     entry.flash.material.rotation = Math.random() * Math.PI * 2
     this.flashUntil = performance.now() + 50
     this.camera.updateMatrixWorld(true)
+    this.rig.matrix.copy(this.camera.matrixWorld)
+    this.rig.updateMatrixWorld(true)
     return { muzzle: entry.flash.getWorldPosition(new THREE.Vector3()), eject: entry.eject.getWorldPosition(new THREE.Vector3()) }
   }
 

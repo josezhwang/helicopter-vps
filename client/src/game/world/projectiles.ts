@@ -16,6 +16,8 @@ const ROUND_SPEED = 260
 const ROUND_CAPACITY = 80
 const CASING_CAPACITY = 60
 const MISSILE_SPEED = 110
+/** Tank shells (the server times its blast by the same speed). */
+const SHELL_SPEED = 260
 const MISSILE_CAPACITY = 16
 /** A missile closer than this to its target has hit it. */
 const MISSILE_HIT_RADIUS = 3
@@ -25,7 +27,8 @@ const CASING_LIFE = 2.5
 
 interface Round { kind: RoundKind; start: THREE.Vector3; dir: THREE.Vector3; length: number; travelled: number; color: THREE.Color }
 interface Casing { kind: CasingKind; position: THREE.Vector3; velocity: THREE.Vector3; spin: THREE.Quaternion; rotation: THREE.Quaternion; age: number; resting: boolean }
-interface Missile { position: THREE.Vector3; velocity: THREE.Vector3; target: () => THREE.Vector3 | null; onArrive?: () => void; age: number; smokeTimer: number }
+interface Missile { position: THREE.Vector3; velocity: THREE.Vector3; target: () => THREE.Vector3 | null; onArrive?: () => void; explode: boolean; age: number; smokeTimer: number }
+interface Shell { position: THREE.Vector3; dir: THREE.Vector3; left: number; onArrive?: () => void; smokeTimer: number }
 interface Particle { position: THREE.Vector3; velocity: THREE.Vector3; age: number; life: number; size0: number; size1: number; alpha: number; fire: boolean; color: THREE.Color; gravity: number; drag: number }
 interface Burner { position: () => THREE.Vector3 | null; until: number; timer: number }
 type CasingKind = 'bullet_9mm' | 'bullet_556' | 'bullet_heavy'
@@ -98,9 +101,19 @@ export interface Projectiles {
   muzzleFlash: (at: THREE.Vector3, dir: THREE.Vector3, scale?: number) => void
   /** A spent casing flung out of a gun: it tumbles, falls, bounces and lies there a moment. */
   casing: (kind: CasingKind, at: THREE.Vector3, velocity: THREE.Vector3) => void
-  /** A homing missile; `target` returns where the aircraft is now (null once it's gone). */
-  missile: (from: THREE.Vector3, target: () => THREE.Vector3 | null, onArrive?: () => void) => void
-  explosion: (at: THREE.Vector3, scale?: number) => void
+  /**
+   * A homing missile (or an unguided rocket aimed at a fixed point); `target` returns where the aircraft is now
+   * (null once it's gone). `explode` false: no blast of its own when it arrives (the server's blast follows).
+   */
+  missile: (from: THREE.Vector3, target: () => THREE.Vector3 | null, onArrive?: () => void, explode?: boolean) => void
+  /** A tank shell: a glowing tracer racing to `to`, a wisp of smoke behind it. */
+  shell: (from: THREE.Vector3, to: THREE.Vector3, onArrive?: () => void) => void
+  /** Fire, smoke, debris and a flash; `ground` adds a ring of dust thrown up around it. */
+  explosion: (at: THREE.Vector3, scale?: number, ground?: boolean) => void
+  /** A puff of dark smoke (damaged vehicles trail it). */
+  smoke: (at: THREE.Vector3, scale?: number) => void
+  /** The dust a cannon's blast kicks up off the ground around its muzzle. */
+  blastDust: (at: THREE.Vector3, radius: number) => void
   /** Smoke and flames rising from a wreck for `seconds`. */
   burn: (position: () => THREE.Vector3 | null, seconds: number) => void
   update: (dt: number) => void
@@ -112,6 +125,7 @@ export function createProjectiles(): Projectiles {
   const rounds: Round[] = []
   const casings: Casing[] = []
   const missiles: Missile[] = []
+  const shells: Shell[] = []
   const particles: Particle[] = []
   const burners: Burner[] = []
   const roundMeshes = new Map<RoundKind, { prop: Prop; meshes: THREE.InstancedMesh[] }>()
@@ -166,16 +180,27 @@ export function createProjectiles(): Projectiles {
   }
   const random = (scale: number) => new THREE.Vector3((Math.random() - 0.5) * scale, (Math.random() - 0.5) * scale, (Math.random() - 0.5) * scale)
 
-  const explosion = (at: THREE.Vector3, scale = 1) => {
+  const dustRing = (at: THREE.Vector3, radius: number, amount: number, color = 0x8a7a62) => {
+    for (let i = 0; i < amount; i++) {
+      const a = (i / amount) * Math.PI * 2 + Math.random() * 0.4
+      const out = new THREE.Vector3(Math.cos(a), 0, Math.sin(a))
+      emit(at.clone().addScaledVector(out, radius * 0.3).setY(at.y + 0.3), out.multiplyScalar(radius * (2.2 + Math.random())).setY(0.6 + Math.random()), 1.6 + Math.random(), radius * 0.35, radius * 1.1, 0.55, false, color, -0.2, 1.4)
+    }
+  }
+  const explosion = (at: THREE.Vector3, scale = 1, ground = false) => {
     for (let i = 0; i < 26 * scale; i++) emit(at.clone().add(random(2 * scale)), random(22 * scale).add(new THREE.Vector3(0, 4, 0)), 0.5 + Math.random() * 0.4, 1.5 * scale, 6 * scale, 1, true, i % 3 ? 0xffa040 : 0xffe07a)
     for (let i = 0; i < 18 * scale; i++) emit(at.clone().add(random(3 * scale)), random(8 * scale).add(new THREE.Vector3(0, 3, 0)), 2.2 + Math.random() * 1.5, 3 * scale, 11 * scale, 0.7, false, 0x3a3a3a)
     for (let i = 0; i < 16 * scale; i++) emit(at.clone(), random(26 * scale).add(new THREE.Vector3(0, 8, 0)), 1 + Math.random(), 0.25 * scale, 0.2 * scale, 1, false, 0x2a2622, 18, 0.2)
+    // Hot sparks arcing out
+    for (let i = 0; i < 12 * scale; i++) emit(at.clone(), random(30 * scale).add(new THREE.Vector3(0, 10, 0)), 0.6 + Math.random() * 0.6, 0.12 * scale, 0.05, 1, true, 0xffc860, 16, 0.3)
+    if (ground) dustRing(at, 2.2 * scale, Math.round(14 * scale))
     flash.position.copy(at)
     flash.intensity = 900 * scale
   }
 
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(1, 1, 1), forward = new THREE.Vector3(0, 0, -1), p = new THREE.Vector3()
   const back = new THREE.Vector3(0, 0, 1)
+  const shellColor = new THREE.Color(0xffb347)
 
   return {
     group,
@@ -216,13 +241,24 @@ export function createProjectiles(): Projectiles {
       const axis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
       casings.push({ kind, position: at.clone(), velocity: velocity.clone(), spin: new THREE.Quaternion().setFromAxisAngle(axis, 0.35), rotation: new THREE.Quaternion().setFromAxisAngle(axis, Math.random() * 6), age: 0, resting: false })
     },
-    missile(from, target, onArrive) {
+    missile(from, target, onArrive, explode = true) {
       if (missiles.length >= MISSILE_CAPACITY) missiles.shift()
       const aim = target()
       const dir = aim ? aim.clone().sub(from).normalize() : new THREE.Vector3(0, 1, 0)
-      missiles.push({ position: from.clone(), velocity: dir.multiplyScalar(MISSILE_SPEED * 0.6), target, onArrive, age: 0, smokeTimer: 0 })
+      missiles.push({ position: from.clone(), velocity: dir.multiplyScalar(MISSILE_SPEED * 0.6), target, onArrive, explode, age: 0, smokeTimer: 0 })
+    },
+    shell(from, to, onArrive) {
+      const dir = to.clone().sub(from)
+      const left = dir.length()
+      shells.push({ position: from.clone(), dir: dir.normalize(), left, onArrive, smokeTimer: 0 })
     },
     explosion,
+    smoke(at, scale = 1) {
+      emit(at.clone().add(random(0.8 * scale)), new THREE.Vector3((Math.random() - 0.5) * 0.8, 2 + Math.random() * 1.5, (Math.random() - 0.5) * 0.8), 2.4, 0.8 * scale, 4 * scale, 0.45, false, 0x2e2e2e, -0.4)
+    },
+    blastDust(at, radius) {
+      dustRing(at, radius, 18)
+    },
     burn(position, seconds) {
       burners.push({ position, until: performance.now() + seconds * 1000, timer: 0 })
     },
@@ -289,7 +325,7 @@ export function createProjectiles(): Projectiles {
         if (aim) {
           const want = aim.clone().sub(missile.position)
           if (want.length() < MISSILE_HIT_RADIUS + MISSILE_SPEED * dt) {
-            explosion(aim, 1.4)
+            if (missile.explode) explosion(aim, 1.4)
             missile.onArrive?.()
             missiles.splice(i, 1)
             continue
@@ -310,6 +346,34 @@ export function createProjectiles(): Projectiles {
         for (const mesh of missileMeshes) mesh.setMatrixAt(slot, m)
       })
       for (const mesh of missileMeshes) { mesh.count = missiles.length; mesh.instanceMatrix.needsUpdate = true }
+
+      // Shells: a bright core and a fading streak, a thread of smoke behind
+      for (let i = shells.length - 1; i >= 0; i--) {
+        const shell = shells[i]
+        const step = Math.min(shell.left, SHELL_SPEED * dt)
+        shell.position.addScaledVector(shell.dir, step)
+        shell.left -= step
+        if (shell.left <= 0.01) {
+          shells.splice(i, 1)
+          shell.onArrive?.()
+          continue
+        }
+        shell.smokeTimer -= dt
+        if (shell.smokeTimer <= 0) {
+          shell.smokeTimer = 0.02
+          emit(shell.position, random(0.3), 0.7, 0.25, 1.1, 0.3, false, 0xcfcfcf)
+        }
+        emit(shell.position, shell.dir.clone().multiplyScalar(40), 0.03, 0.9, 0.5, 1, true, 0xffd27a)
+        m.compose(shell.position, q.setFromUnitVectors(back, shell.dir.clone().negate()), s.set(9, 9, Math.min(14, SHELL_SPEED * 0.06)))
+        if (streakCount < ROUND_CAPACITY) {
+          streaks.setMatrixAt(streakCount, m)
+          streaks.setColorAt(streakCount, shellColor)
+          streakCount++
+        }
+      }
+      streaks.count = streakCount
+      streaks.instanceMatrix.needsUpdate = true
+      if (streaks.instanceColor) streaks.instanceColor.needsUpdate = true
 
       // Wrecks keep burning
       const now = performance.now()

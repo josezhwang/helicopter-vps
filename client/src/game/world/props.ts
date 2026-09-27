@@ -8,7 +8,7 @@ import type { GunModel } from './weapons'
  * rounds point along -Z (muzzle / nose at the far end), centred, and merged into one piece per material.
  * The viewmodel, the soldiers, the pickups and the flying rounds all build on these.
  */
-export type PropName = GunModel | 'missile' | 'bullet_9mm' | 'bullet_556' | 'bullet_heavy' | 'missile_crate' | 'ammo_9mm' | 'ammo_556'
+export type PropName = GunModel | 'missile' | 'bullet_9mm' | 'bullet_556' | 'bullet_heavy' | 'missile_crate' | 'ammo_9mm' | 'ammo_556' | 'grenade' | 'barrel' | 'sandbags' | 'jersey' | 'crate' | 'jerrycan' | 'generator'
 
 interface Spec {
   url: string
@@ -21,7 +21,7 @@ interface Spec {
 }
 
 const SPECS: Record<PropName, Spec> = {
-  handgun: { url: '/models/handgun.glb', size: 0.34, rotate: [0, 0, 0] },
+  handgun: { url: '/models/handgun.glb', size: 0.34, rotate: [0, Math.PI / 2, 0] },
   primary: { url: '/primary-handgun.glb', size: 0.95, rotate: [0, -Math.PI / 2, 0] },
   launcher: { url: '/models/launcher.glb', size: 1.6, rotate: [0, Math.PI / 2, 0] },
   gun_m4a1: { url: '/models/gun_m4a1.glb', size: 0.95, rotate: [0, Math.PI / 2, 0] },
@@ -31,13 +31,20 @@ const SPECS: Record<PropName, Spec> = {
   gun_plasma: { url: '/models/gun_plasma.glb', size: 1, rotate: [0, Math.PI, 0] },
   gun_m170: { url: '/models/gun_m170.glb', size: 1.35, rotate: [0, 0, 0] },
   gun_svd: { url: '/models/gun_svd.glb', size: 1.2, rotate: [0, 0, 0] },
-  missile: { url: '/models/missile.glb', size: 1.1, rotate: [-Math.PI / 2, 0, 0] },
+  missile: { url: '/models/missile.glb', size: 1.25, rotate: [0, Math.PI, 0] },
   bullet_9mm: { url: '/models/bullet_9mm.glb', size: 0.16, rotate: [-Math.PI / 2, 0, 0] },
   bullet_556: { url: '/models/bullet_556.glb', size: 0.22, rotate: [0, Math.PI / 2, 0] },
   bullet_heavy: { url: '/models/bullet_heavy.glb', size: 0.55, rotate: [0, -Math.PI / 2, 0] },
   missile_crate: { url: '/models/missile_crate.glb', size: 1.55, rotate: [0, 0, 0], grounded: true },
   ammo_9mm: { url: '/models/ammo_9mm.glb', size: 0.7, rotate: [0, 0, 0], grounded: true },
   ammo_556: { url: '/models/ammo_556.glb', size: 0.7, rotate: [0, 0, 0], grounded: true },
+  grenade: { url: '/models/grenade.glb', size: 0.17, rotate: [0, 0, 0] },
+  barrel: { url: '/models/barrel.glb', size: 1.05, rotate: [0, 0, 0], grounded: true },
+  sandbags: { url: '/models/sandbags.glb', size: 3.3, rotate: [0, 0, 0], grounded: true },
+  jersey: { url: '/models/jersey.glb', size: 1.57, rotate: [0, 0, 0], grounded: true },
+  crate: { url: '/models/crate.glb', size: 0.8, rotate: [0, 0, 0], grounded: true },
+  jerrycan: { url: '/models/jerrycan.glb', size: 0.48, rotate: [0, 0, 0], grounded: true },
+  generator: { url: '/models/generator.glb', size: 0.82, rotate: [0, 0, 0], grounded: true },
 }
 
 export interface Prop {

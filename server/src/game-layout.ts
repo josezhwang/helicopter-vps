@@ -24,7 +24,34 @@ const row = (count: number, x0: number, dx: number, z: number) => Array.from({ l
 const MISSILE_CRATES = [...row(5, 4, 4, 5), ...row(5, 4, 4, 9)]
 const GUN_TABLE = { x: 20, z0: -40, dz: 2, count: 14 }
 const TABLE_GUNS = ['m4a1', 'm254', 'pulse', 'm240b', 'plasma', 'm170', 'svd'] as const
-const AMMO_ROW = { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762', 'sniper', 'sniper', 'plasma', 'plasma'] as const }
+const AMMO_ROW = { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762', 'sniper', 'sniper', 'plasma', 'plasma', 'grenade', 'grenade'] as const }
+/** Two tanks per base, left of the gate outside the walls (base frame, noses out). */
+const TANKS: Array<[number, number]> = [[-30, 68], [-44, 68]]
+/** Two combat mechs per base, either side of the gate outside the walls (base frame, facing out). */
+const MECHS: Array<[number, number]> = [[-58, 72], [62, 72]]
+const HELIS = Array.from({ length: 5 }, (_, i) => [34, -42 + i * 14] as [number, number])
+const CARS = Array.from({ length: 5 }, (_, i) => [24 + i * 6, 66] as [number, number])
+/** Explosive barrels: two by each gate, one by the fuel tanker (base frame). */
+const BASE_BARRELS: Array<[number, number]> = [[-26, 57], [26, 57], [-21, 27]]
+
+/**
+ * Sandbag outposts in the open between the bases (world XZ, point-symmetric pairs). Each faces the base it is
+ * further from — a U of sandbag walls with an explosive barrel and an ammo box. Must match the client.
+ */
+export const OUTPOSTS: Array<[number, number]> = [[-50, 80], [50, -80], [140, -120], [-140, 120], [130, 120], [-130, -120]]
+export function outpostYaw(i: number): number {
+  const [x, z] = OUTPOSTS[i]
+  const far = Math.hypot(x + 380, z + 380) > Math.hypot(x - 380, z - 380) ? [-380, -380] : [380, 380]
+  return Math.atan2(far[0] - x, far[1] - z)
+}
+/** A point in an outpost's own frame (+Z = the side it faces) in world XZ. */
+export function outpostToWorld(i: number, x: number, z: number): [number, number] {
+  const [cx, cz] = OUTPOSTS[i]
+  const a = outpostYaw(i)
+  return [cx + x * Math.cos(a) + z * Math.sin(a), cz - x * Math.sin(a) + z * Math.cos(a)]
+}
+export const OUTPOST_BARREL: [number, number] = [-4.6, -1.2]
+export const OUTPOST_AMMO: [number, number] = [2.6, -1.6]
 const PRIMARY_AMMO: Array<[number, number]> = [[-8, 42], [-8, 44.5], [-8, 47]]
 const HANDGUN_AMMO: Array<[number, number]> = [[8, 42], [8, 44.5], [8, 47]]
 
@@ -50,11 +77,11 @@ export const WEAPONS = {
   launcher: { slot: 'launcher', ammo: 'missile', mag: 1, power: 0, fireRate: 1.5, range: 700 },
 } as const
 export type WeaponKind = keyof typeof WEAPONS
-export type AmmoType = '9mm' | '556' | '762' | 'sniper' | 'plasma' | 'missile'
+export type AmmoType = '9mm' | '556' | '762' | 'sniper' | 'plasma' | 'missile' | 'grenade'
 /** Spare rounds a player can carry, and what a base's ammo box holds. */
 export const AMMO: Record<AmmoType, { max: number; box: number }> = {
   '9mm': { max: 14, box: 42 }, '556': { max: 60, box: 120 }, '762': { max: 200, box: 300 },
-  sniper: { max: 20, box: 30 }, plasma: { max: 24, box: 32 }, missile: { max: 4, box: 4 },
+  sniper: { max: 20, box: 30 }, plasma: { max: 24, box: 32 }, missile: { max: 4, box: 4 }, grenade: { max: 4, box: 8 },
 }
 export const AMMO_TYPES = Object.keys(AMMO) as AmmoType[]
 
@@ -98,5 +125,26 @@ export function initialItems(): Item[] {
     }
     AMMO_ROW.types.forEach((type, i) => put(`ammo-row-${i}`, `ammo-${type}`, [AMMO_ROW.x, AMMO_ROW.z0 + i * AMMO_ROW.dz], AMMO[type].box))
   }
+  // An ammo box in every outpost
+  OUTPOSTS.forEach((_, i) => {
+    const [x, z] = outpostToWorld(i, ...OUTPOST_AMMO)
+    items.push({ id: `outpost-${i}-ammo`, kind: 'ammo-556', x, z, yaw: outpostYaw(i), count: AMMO['556'].box, mag: 0, fixed: true })
+  })
   return items
 }
+
+export type VehicleKindId = 'heli' | 'car' | 'tank' | 'mech'
+export const VEHICLE_MAX_HP: Record<VehicleKindId, number> = { heli: 450, car: 700, tank: 2000, mech: 1600 }
+/** Where each vehicle is parked at the start (world XZ): used when nobody has moved it yet. */
+export const VEHICLE_HOMES = new Map<string, [number, number]>(TEAMS.flatMap((team) => [
+  ...HELIS.map((spot, i) => [`${team}-heli-${i}`, baseToWorld(team, ...spot)] as const),
+  ...CARS.map((spot, i) => [`${team}-car-${i}`, baseToWorld(team, ...spot)] as const),
+  ...TANKS.map((spot, i) => [`${team}-tank-${i}`, baseToWorld(team, ...spot)] as const),
+  ...MECHS.map((spot, i) => [`${team}-mech-${i}`, baseToWorld(team, ...spot)] as const),
+]))
+
+/** Every explosive barrel (world XZ): by the bases' gates and tankers, and one per outpost. */
+export const BARRELS: Array<{ id: string; x: number; z: number }> = [
+  ...TEAMS.flatMap((team) => BASE_BARRELS.map((spot, i) => { const [x, z] = baseToWorld(team, ...spot); return { id: `${team}-barrel-${i}`, x, z } })),
+  ...OUTPOSTS.map((_, i) => { const [x, z] = outpostToWorld(i, ...OUTPOST_BARREL); return { id: `outpost-${i}-barrel`, x, z } }),
+]

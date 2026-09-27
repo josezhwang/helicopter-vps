@@ -6,7 +6,7 @@
  */
 export type WeaponKind = 'handgun' | 'primary' | 'm4a1' | 'm254' | 'pulse' | 'm240b' | 'plasma' | 'm170' | 'svd' | 'launcher'
 export type Slot = 'sidearm' | 'long' | 'launcher'
-export type AmmoType = '9mm' | '556' | '762' | 'sniper' | 'plasma' | 'missile'
+export type AmmoType = '9mm' | '556' | '762' | 'sniper' | 'plasma' | 'missile' | 'grenade'
 export type RoundKind = 'bullet_9mm' | 'bullet_556' | 'bullet_heavy' | 'bolt'
 export type GunModel = 'handgun' | 'primary' | 'launcher' | 'gun_m4a1' | 'gun_m254' | 'gun_pulse' | 'gun_m240b' | 'gun_plasma' | 'gun_m170' | 'gun_svd'
 
@@ -63,6 +63,7 @@ export const AMMO: Record<AmmoType, { name: string; max: number; box: number }> 
   sniper: { name: 'sniper rounds', max: 20, box: 30 },
   plasma: { name: 'plasma cells', max: 24, box: 32 },
   missile: { name: 'AA missiles', max: 4, box: 4 },
+  grenade: { name: 'grenades', max: 4, box: 8 },
 }
 export const AMMO_TYPES = Object.keys(AMMO) as AmmoType[]
 

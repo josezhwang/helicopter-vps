@@ -1,3 +1,4 @@
+import type { Quality } from './world/graphics'
 import type { Team } from './world/bases'
 import type { WeaponKind } from './world/weapons'
 
@@ -12,6 +13,19 @@ export interface RosterEntry {
   you: boolean
 }
 
+/** One line of the kill feed. */
+export interface KillEntry {
+  id: number
+  killer: string
+  killerTeam: Team | null
+  victim: string
+  victimTeam: Team | null
+  /** What did it (weapon / explosion name). */
+  how: string
+  /** We were the killer or the victim. */
+  mine: boolean
+}
+
 export interface GameState {
   /** Loaded rounds, magazine size and spare rounds of the weapon in hand. */
   ammo: number
@@ -22,7 +36,25 @@ export interface GameState {
   weapons: WeaponKind[]
   current: WeaponKind | null
   /** What we are flying/driving, if anything, and in which seat (0 = pilot / driver). */
-  vehicle: 'heli' | 'car' | null
+  vehicle: 'heli' | 'car' | 'tank' | 'mech' | null
+  /** Our vehicle's hull strength, 0..1. */
+  vehicleHp: number
+  /** Tank cannon: 0..1 loaded (1 = ready), -1 when not driving a tank. */
+  cannon: number
+  /** Where the tank's gun is pointing on screen (0..1), -1 when not driving one. */
+  gunX: number
+  gunY: number
+  /** Looking through the tank's gunner sight. */
+  tankSight: boolean
+  /** Hand grenades carried ([Q] throws one). */
+  grenades: number
+  killFeed: KillEntry[]
+  /** Graphics setting in use (Ultra / High / Medium / Low). */
+  quality: Quality
+  /** A mech's jump-jet fuel, 0..1. */
+  jet: number
+  /** Where the last damage came from, relative to where we look (radians, 0 = ahead, + = to the right); null = unknown. */
+  damageDir: number | null
   seat: number
   /** Manning a base machine gun. */
   onGun: boolean
@@ -61,6 +93,26 @@ export interface GameState {
 
 type Listener = (s: GameState) => void
 
+/** Something on the radar (world XZ). */
+export interface RadarBlip {
+  x: number
+  z: number
+  kind: 'mate' | 'enemy' | 'heli' | 'car' | 'tank' | 'mech' | 'gem' | 'barrel'
+  team: Team | null
+  /** Heading (world, 0 = +Z) for players and vehicles. */
+  yaw: number
+  /** A vehicle: nobody in it (drawn dim). */
+  empty?: boolean
+  /** Carrying a gem. */
+  gem?: boolean
+}
+
+/**
+ * The radar's picture, written by the game a few times a second and drawn by the HUD on its own clock (so it
+ * never re-renders the rest of the HUD). `version` goes up with every new picture.
+ */
+export const radar = { x: 0, z: 0, yaw: 0, range: 180, blips: [] as RadarBlip[], version: 0 }
+
 const INITIAL_STATE: GameState = {
   ammo: 30,
   maxAmmo: 30,
@@ -69,6 +121,16 @@ const INITIAL_STATE: GameState = {
   weapons: ['handgun', 'primary'],
   current: 'primary',
   vehicle: null,
+  vehicleHp: 1,
+  cannon: -1,
+  gunX: -1,
+  gunY: -1,
+  tankSight: false,
+  grenades: 2,
+  killFeed: [],
+  quality: 'ultra',
+  jet: 1,
+  damageDir: null,
   seat: 0,
   onGun: false,
   interactPrompt: '',

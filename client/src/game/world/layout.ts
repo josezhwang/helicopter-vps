@@ -46,9 +46,47 @@ export const LAYOUT = {
   missileCrates: [...row(5, 4, 4, 5), ...row(5, 4, 4, 9)],
   /** The gun table beside the helicopter row: two of every long gun, lying across it. */
   gunTable: { x: 20, z0: -40, dz: 2, count: 14 },
-  /** Ammo for the table's guns, in a row beside it. */
-  ammoRow: { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762', 'sniper', 'sniper', 'plasma', 'plasma'] as const },
+  /** Ammo for the table's guns (and grenades), in a row beside it. */
+  ammoRow: { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762', 'sniper', 'sniper', 'plasma', 'plasma', 'grenade', 'grenade'] as const },
+  /** Two tanks left of the gate, outside the walls, noses out. */
+  tanks: [[-30, 68], [-44, 68]] as Spot[],
+  tankYaw: 0,
+  /** Two combat mechs either side of the gate, outside the walls, facing out. */
+  mechs: [[-58, 72], [62, 72]] as Spot[],
+  mechYaw: 0,
+  /** Explosive barrels: two by the gate, one by the fuel tanker. */
+  barrels: [[-26, 57], [26, 57], [-21, 27]] as Spot[],
   /** Ammo boxes in the fenced gate lane behind the spawn: primary-gun (5.56) rounds left, handgun (9mm) rounds right. */
   primaryAmmo: [[-8, 42], [-8, 44.5], [-8, 47]] as Spot[],
   handgunAmmo: [[8, 42], [8, 44.5], [8, 47]] as Spot[],
 }
+
+/**
+ * Sandbag outposts in the open between the bases (world XZ, point-symmetric pairs). Each faces the base it is
+ * further from: a U of sandbag walls with an explosive barrel and an ammo box. Must match the server.
+ */
+export const OUTPOSTS: Array<[number, number]> = [[-50, 80], [50, -80], [140, -120], [-140, 120], [130, 120], [-130, -120]]
+export function outpostYaw(i: number): number {
+  const [x, z] = OUTPOSTS[i]
+  const far = Math.hypot(x + 380, z + 380) > Math.hypot(x - 380, z - 380) ? [-380, -380] : [380, 380]
+  return Math.atan2(far[0] - x, far[1] - z)
+}
+/** A point in an outpost's own frame (+Z = the side it faces) in world XZ. */
+export function outpostToWorld(i: number, x: number, z: number): { x: number; z: number } {
+  const [cx, cz] = OUTPOSTS[i]
+  const a = outpostYaw(i)
+  return { x: cx + x * Math.cos(a) + z * Math.sin(a), z: cz - x * Math.sin(a) + z * Math.cos(a) }
+}
+export const OUTPOST_BARREL: Spot = [-4.6, -1.2]
+export const OUTPOST_AMMO: Spot = [2.6, -1.6]
+/** Sandbag walls of an outpost (own frame): centre, heading. Two across the front, one angled back on each side. */
+export const OUTPOST_WALLS: Array<{ x: number; z: number; yaw: number }> = [
+  { x: -1.6, z: 3, yaw: 0 }, { x: 1.6, z: 3, yaw: 0 },
+  { x: -4.1, z: 1.2, yaw: Math.PI / 2 - 0.35 }, { x: 4.1, z: 1.2, yaw: -Math.PI / 2 + 0.35 },
+]
+
+/** Every explosive barrel, world XZ (ids as the server's). */
+export const BARREL_SPOTS: Array<{ id: string; x: number; z: number }> = [
+  ...(['blue', 'red'] as Team[]).flatMap((team) => LAYOUT.barrels.map(([x, z], i) => ({ id: `${team}-barrel-${i}`, ...baseToWorld(team, x, z) }))),
+  ...OUTPOSTS.map((_, i) => ({ id: `outpost-${i}-barrel`, ...outpostToWorld(i, ...OUTPOST_BARREL) })),
+]

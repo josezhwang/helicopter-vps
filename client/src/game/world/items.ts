@@ -43,7 +43,7 @@ const RACK_TOP = 0.9
 export const ITEM_REACH = 2.4
 
 type Visual = PropName
-const CAPACITY: Partial<Record<Visual, number>> = { launcher: 90, handgun: 70, primary: 70, missile: 120, missile_crate: 20, ammo_556: 60, ammo_9mm: 24 }
+const CAPACITY: Partial<Record<Visual, number>> = { launcher: 90, handgun: 70, primary: 70, missile: 120, missile_crate: 20, ammo_556: 60, ammo_9mm: 24, grenade: 60 }
 /** Supplies further than this aren't drawn (small things, lost in the distance); guns closer still. */
 const DRAW_DISTANCE = 220
 const GUN_DRAW_DISTANCE = 90
@@ -51,6 +51,7 @@ const GUN_DRAW_DISTANCE = 90
 const BOX: Record<AmmoType, { visual: Visual; scale: number }> = {
   '9mm': { visual: 'ammo_9mm', scale: 1 }, '556': { visual: 'ammo_556', scale: 1 }, '762': { visual: 'ammo_556', scale: 1.4 },
   sniper: { visual: 'ammo_556', scale: 0.8 }, plasma: { visual: 'ammo_556', scale: 1.1 }, missile: { visual: 'missile_crate', scale: 1 },
+  grenade: { visual: 'ammo_556', scale: 1.25 },
 }
 
 export interface ItemField {
@@ -111,7 +112,7 @@ export function createItems(): ItemField {
     }
   }
 
-  const visuals: Visual[] = [...new Set<Visual>([...WEAPON_KINDS.map((k) => WEAPONS[k].model), 'missile', 'missile_crate', 'ammo_556', 'ammo_9mm'])]
+  const visuals: Visual[] = [...new Set<Visual>([...WEAPON_KINDS.map((k) => WEAPONS[k].model), 'missile', 'missile_crate', 'ammo_556', 'ammo_9mm', 'grenade'])]
   for (const visual of visuals) {
     void loadProp(visual).then((prop) => {
       meshes.set(visual, { prop, meshes: propInstances(prop, CAPACITY[visual] ?? 40, false, group) })
@@ -167,6 +168,17 @@ export function createItems(): ItemField {
           const local = p.set(0, 0.32 + Math.floor(i / 2) * 0.24, box.min.z + depth * (i % 2 === 0 ? 0.25 : 0.52))
           local.applyAxisAngle(new THREE.Vector3(0, 1, 0), item.yaw).add(base)
           place('missile', local.clone(), e.set(0, item.yaw + Math.PI / 2, 0, 'YXZ'))
+        }
+        continue
+      }
+      if (ammo === 'grenade') {
+        // A box with grenades on top (dropped grenades: just the grenades on the ground)
+        const at = positionOf(item)
+        if (item.fixed) place('ammo_556', at, e.set(0, item.yaw, 0, 'YXZ'), BOX.grenade.scale)
+        const top = item.fixed ? 0.42 : 0.08
+        for (let i = 0; i < Math.min(3, Math.ceil(item.count / 2)); i++) {
+          const local = p.set((i - 1) * 0.2, top, (i % 2) * 0.12 - 0.06).applyAxisAngle(new THREE.Vector3(0, 1, 0), item.yaw).add(at)
+          place('grenade', local.clone(), e.set(0, item.yaw + i, Math.PI / 2, 'YXZ'))
         }
         continue
       }

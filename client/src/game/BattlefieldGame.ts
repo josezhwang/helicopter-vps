@@ -1,11 +1,22 @@
 import * as THREE from 'three'
-import { createTerrain, createWater, createSkyAndLights, heightAt, SHADOW_RANGE, SUN_OFFSET, FOG_FAR } from './world/terrain'
+import { createTerrain, heightAt } from './world/terrain'
+import { createWater } from './world/water'
+import { createSky, FOG_FAR, SUN_DIRECTION, type SkyRig } from './world/sky'
+import { Graphics, loadQuality, saveQuality, PROFILES, type Quality, type QualityProfile } from './world/graphics'
 import { createBase, GEM_LOCAL, BASE_HALF, type BaseObjects, type Team } from './world/bases'
-import { createRocks, createBushes, createClouds, createGrass, type GrassField, type RockField } from './world/nature'
+import { createRocks, createBushes, createGrass, type GrassField, type RockField } from './world/nature'
 import { createForest, type ForestField } from './world/forest'
+import { createGrassBlades, type GrassBlades } from './world/grassField'
+import { bakeGroundMap, type GroundMap } from './world/groundMap'
 import { createTurrets, type Turret, type TurretField } from './world/turrets'
-import { createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, CAR_GUN_PITCH, TURRET_PIVOT, GATLING_PIVOT, type Fleet, type Vehicle } from './world/vehicles'
-import { BASE_CENTER, BASE_ROTATION, LAYOUT, PLATEAU_HALF, baseToWorld, baseYaw } from './world/layout'
+import {
+  createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, CAR_GUN_PITCH, TURRET_PIVOT, GATLING_PIVOT,
+  TANK_GUN_PIVOT, TANK_GUN_PITCH, TANK_TURRET_PIVOT, MECH_RADIUS, MECH_AIRBORNE, HELI_GUN_PIVOT, HELI_GUN_LIMITS, TANK_CIRCLE_RADIUS, TANK_CIRCLE_OFFSET, TANK_LENGTH, TANK_WIDTH, VEHICLE_MAX_HP, type Fleet, type Vehicle,
+} from './world/vehicles'
+import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, LAYOUT, PLATEAU_HALF, baseToWorld, baseYaw } from './world/layout'
+import { createOutposts, type Outposts } from './world/outposts'
+import { createGrenades, GRENADE_FUSE, THROW_SPEED, type Grenades } from './world/grenades'
+import { GameAudio, type LoopSource, type ShotSound } from './world/audio'
 import { Player, EYE_HEIGHT } from './world/player'
 import { Viewmodel } from './world/viewmodel'
 import { Arsenal, type Shot } from './world/weapon'
@@ -14,8 +25,8 @@ import { createItems, itemLabel, ammoOf, isWeaponItem, type ItemField, type NetI
 import { createProjectiles, type Projectiles, type Surface } from './world/projectiles'
 import { createDecals, type Decals } from './world/decals'
 import { createAvatar, muzzleFlashTexture, type Avatar } from './world/avatar'
-import { gameState, setGameState, type RosterEntry } from './state'
-import type { Multiplayer, NetPlayer, NetState, Took, Vec3, WorldSnapshot } from './net'
+import { gameState, radar, setGameState, type KillEntry, type RadarBlip, type RosterEntry } from './state'
+import type { BlastKind, Multiplayer, NetPlayer, NetState, ProjectileKind, Took, Vec3, WorldSnapshot } from './net'
 
 export interface MatchSetup {
   you: string
@@ -34,6 +45,8 @@ interface RemotePlayer {
   diedInVehicle: boolean
   /** Smoothed ground speed of the rendered avatar, drives idle/run blending. */
   speed: number
+  /** When they last fired or threw something (it shows them on the radar). */
+  lastFiredAt: number
 }
 
 /** Climbing into / out of a helicopter: the view moves from where we stand, past the door, to the seat (or back). */
@@ -57,7 +70,7 @@ const PLAYER_BLOCK_HEIGHT = 1.8
 const SNAP_DISTANCE = 25
 const TEAM_NAME: Record<Team, string> = { blue: 'BLUE', red: 'RED' }
 /** How close you have to be to get in (metres from the vehicle's centre) or onto a machine gun. */
-const BOARD_RANGE = { heli: 7.5, car: 6 }
+const BOARD_RANGE = { heli: 7.5, car: 6, tank: 6.5, mech: 5.5 }
 const GUN_RANGE = 3.8
 /** Battle car handling: top speed / reverse speed (m/s), acceleration, braking, coasting (m/s²), steering lock. */
 const CAR_MAX_SPEED = 24
@@ -77,7 +90,72 @@ const EXIT_TIME = 1.1
 /** Machine gun aim limits: how far up (and down) the barrel can point. */
 const GUN_PITCH_UP = 0.9
 const GUN_PITCH_DOWN = 0.3
-const label = (v: Vehicle) => (v.kind === 'heli' ? 'helicopter' : 'battle car')
+/** Tank handling: top speed / reverse (m/s), acceleration, braking (m/s²), hull and turret turn rates (rad/s). */
+const TANK_MAX_SPEED = 11
+const TANK_REVERSE_SPEED = 5
+const TANK_ACCEL = 4.5
+const TANK_BRAKE = 12
+const TANK_TURN = 0.8
+const TANK_TURRET_SPEED = 0.9
+const TANK_PITCH_SPEED = 0.6
+/** Seconds to load the next shell (the server allows no faster). */
+const TANK_RELOAD = 3
+/** Gunner's sight: eye position in turret space, and its magnification. */
+/** The gunner's sight on the turret roof (relative to the turret's turning axis). */
+const TANK_SIGHT = new THREE.Vector3(0.35, 3.75, 0.4)
+const TANK_SIGHT_ZOOM = 2.4
+/** How far a tank shell and an unguided rocket fly before they go off by themselves. */
+const SHELL_RANGE = 640
+const ROCKET_RANGE = 440
+/**
+ * The combat mech: walks at MECH_WALK m/s (runs with Shift), turns on the spot, and hops on its jump-jets
+ * (SPACE, MECH_JET_TIME seconds of fuel, refilling on the ground). Its torso turns towards the crosshair; the
+ * arm autocannon fires heavy rounds, the shoulder pods a salvo of rockets.
+ */
+const MECH_WALK = 4.2
+const MECH_RUN = 8.5
+const MECH_BACK = 2.6
+const MECH_ACCEL = 6
+const MECH_TURN = 1.05
+const MECH_GRAVITY = 13
+const MECH_JET_THRUST = 21
+const MECH_JET_TIME = 2.2
+const MECH_JET_REFILL = 0.3
+const MECH_TWIST_LIMIT = 1.9
+const MECH_TWIST_SPEED = 2.4
+const MECH_PITCH = { up: 0.5, down: 0.35 }
+/** Height the torso aims from (the gun arm's shoulder). */
+const MECH_AIM_HEIGHT = 5.4
+const MECH_CANNON = { id: 'mech-cannon', power: 22, fireRate: 0.11, range: 420, spread: 0.012, color: 0xffc46a }
+const MECH_SALVO = 6
+/** The helicopter's nose gun (the gunner's seat). */
+const HELI_GUN = { id: 'heli-gun', power: 16, fireRate: 0.09, range: 400, spread: 0.012, color: 0xffd08a }
+const MECH_ROCKET_GAP = 0.16
+const MECH_SALVO_RELOAD = 7
+/** Metres per footstep (for the thud). */
+const MECH_STRIDE = 3.2
+
+/** Seconds between grenades, and how long the throw keeps the gun out of view. */
+const GRENADE_COOLDOWN = 0.9
+const THROW_TIME = 0.45
+const MAX_LIVE_GRENADES = 3
+const KILL_FEED_MS = 7000
+const KILL_FEED_SIZE = 5
+/** How big each kind of explosion looks and sounds. */
+const BLAST_SIZE: Record<BlastKind, number> = { shell: 1.5, rocket: 1.4, grenade: 1, barrel: 1.8 }
+/** What the kill feed calls each way to die (weapons use their own names). */
+const HOW_LABEL: Record<string, string> = {
+  'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Helicopter nose gun', missile: 'AA missile', shell: 'Tank shell', rocket: 'Rocket',
+  grenade: 'Grenade', barrel: 'Barrel', wreck: 'Wreck',
+}
+const howLabel = (how: string) => HOW_LABEL[how] ?? WEAPONS[how as WeaponKind]?.name ?? how
+/** What each weapon sounds like. */
+const SHOT_SOUND: Record<string, ShotSound> = {
+  handgun: 'pistol', primary: 'rifle', m4a1: 'rifle', m254: 'rifle', pulse: 'heavy', m240b: 'heavy', plasma: 'plasma',
+  m170: 'sniper', svd: 'sniper', 'machine-gun': 'mg', 'car-gun': 'gatling', 'mech-cannon': 'heavy', 'heli-gun': 'gatling',
+}
+const LABEL: Record<Vehicle['kind'], string> = { heli: 'helicopter', car: 'battle car', tank: 'tank', mech: 'combat mech' }
+const label = (v: Vehicle) => LABEL[v.kind]
 const other = (team: Team): Team => (team === 'blue' ? 'red' : 'blue')
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a))
 
@@ -114,7 +192,38 @@ export class BattlefieldGame {
   private heliRoll = 0
   private heliPitch = 0
   private heliAltitude = 0
+  /** Speed of the car or tank we drive (m/s along its nose). */
   private carSpeed = 0
+  private cannonCooldown = 0
+  /** The tank's last sight and barrel rays (distances along them), refreshed a dozen times a second. */
+  private tankAim = { distance: SHELL_RANGE, at: 0, gunDistance: SHELL_RANGE, gunAt: 0 }
+  /** [E] on a vehicle with enemies aboard: waiting for the server to pull them out. */
+  private pendingHijack: { vehicle: Vehicle; until: number } | null = null
+  private grenadeCooldown = 0
+  /** Counts down while the arm is busy throwing. */
+  private throwTimer = 0
+  /** Camera shake from blasts and our own cannon, dies away by itself. */
+  private shake = 0
+  /** The last explosion that went off close to us (damage from it points there). */
+  private nearBlast: { at: THREE.Vector3; time: number } | null = null
+  private killFeed: Array<KillEntry & { at: number }> = []
+  private killCount = 0
+  private lastRadarAt = 0
+  private lastShadeAt = 0
+  /** Our mech: vertical speed, jet fuel (0..1), gun cooldown, the rocket salvo, footstep distance. */
+  private mechVy = 0
+  private mechJet = 1
+  private mechGunCooldown = 0
+  private mechSalvo = { left: MECH_SALVO, next: 0, reloadUntil: 0 }
+  private mechStep = 0
+  private mechAim = { distance: 300, at: 0 }
+  private shadeRay = new THREE.Raycaster()
+  /** Two lights that flash where things blow up and where we fire (always present, dark when idle). */
+  private flashes: Array<{ light: THREE.PointLight; from: number; until: number; peak: number }> = []
+  private lastLoopsAt = 0
+  private smokeTimer = 0
+  /** For reload / switch / empty-click sounds. */
+  private soundState = { reloading: false, mag: 0, kind: null as WeaponKind | null, trigger: false }
   /** Launcher lock-on: the helicopter in the sights and for how long. */
   private lock: { target: Vehicle | null; time: number } = { target: null, time: 0 }
   /** An item we asked the server for (don't ask twice while waiting). */
@@ -124,7 +233,9 @@ export class BattlefieldGame {
   private solidCircles: Array<{ x: number; z: number; r: number }> = []
   private colliders: THREE.Box3[] = []
   private dead = false
-  private sun!: THREE.DirectionalLight
+  private sky: SkyRig
+  private water: ReturnType<typeof createWater>
+  private graphics: Graphics
   private deathCamRoll = 0
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
@@ -135,6 +246,9 @@ export class BattlefieldGame {
   private items: ItemField
   private projectiles: Projectiles
   private decals: Decals
+  private outposts: Outposts
+  private grenades: Grenades
+  private audio = new GameAudio()
   /** Right-mouse aiming: current zoom (field of view divisor). */
   private zoom = 1
   private carGunCooldown = 0
@@ -142,7 +256,10 @@ export class BattlefieldGame {
   private enemyBase: BaseObjects
   private bases: { blue: BaseObjects; red: BaseObjects }
   private turrets: TurretField
-  private grass: GrassField
+  private grass: GrassField | null = null
+  private blades: GrassBlades | null = null
+  private groundMap: GroundMap
+  private noGrass: (x: number, z: number) => boolean
   private rocks: RockField
   private forest: ForestField
   private terrain: THREE.Mesh
@@ -173,10 +290,9 @@ export class BattlefieldGame {
     this.team = match.players.find((p) => p.id === match.you)?.team ?? 'blue'
 
     // Renderer: ask Chrome for the discrete GPU on laptops/desktops that have one
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
-    this.renderer.setSize(container.clientWidth, container.clientHeight)
-    // 1.5x keeps high-DPI monitors sharp without rendering 4x the pixels
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+    // (post-processing does the anti-aliasing and tone mapping, see Graphics)
+    const quality = loadQuality()
+    this.renderer = new THREE.WebGLRenderer({ antialias: quality === 'low', powerPreference: 'high-performance', stencil: false })
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -188,24 +304,39 @@ export class BattlefieldGame {
     this.camera.rotation.order = 'YXZ'
     this.scene.add(this.camera)
 
+    // Sky, sun and the frame pipeline (post effects), at the remembered quality
+    this.sky = createSky(this.scene, this.renderer, PROFILES[quality])
+    this.graphics = new Graphics(this.renderer, this.scene, this.camera, SUN_DIRECTION, quality)
+    this.graphics.setSize(container.clientWidth, container.clientHeight)
+    setGameState({ quality })
+
     // World
-    this.sun = createSkyAndLights(this.scene)
-    this.terrain = createTerrain()
+    this.terrain = createTerrain({ textureSize: PROFILES[quality].terrainTextures, anisotropy: Math.min(PROFILES[quality].anisotropy, this.renderer.capabilities.getMaxAnisotropy()) })
     const worldCircles = this.solidCircles
     this.scene.add(this.terrain)
-    this.scene.add(createWater())
-    // Vehicle parking first: nothing grows on it
+    this.water = createWater()
+    this.scene.add(this.water.mesh)
+    for (let i = 0; i < 2; i++) {
+      const light = new THREE.PointLight(0xffa860, 0, 45, 2)
+      this.scene.add(light)
+      this.flashes.push({ light, from: 0, until: 0, peak: 0 })
+    }
+    // Vehicle parking and the sandbag outposts first: nothing grows on them
     this.fleet = createFleet()
     this.scene.add(this.fleet.group)
     this.scene.add(this.fleet.hitGroup)
+    this.outposts = createOutposts()
+    this.scene.add(this.outposts.group)
+    this.scene.add(this.outposts.blockers)
+    worldCircles.push(...this.outposts.circles)
+    const outpost = (x: number, z: number, margin: number) => this.outposts.near(x, z, margin)
     // Rocks next, so trees can keep clear of them; nothing grows inside the bases
-    this.rocks = createRocks(worldCircles, (x, z) => inBase(x, z, 5) || this.fleet.clearance(x, z, 3))
-    this.forest = createForest(this.renderer, worldCircles, (x, z) => inBase(x, z, PLATEAU_HALF - BASE_HALF + 10) || this.fleet.clearance(x, z, 5))
+    this.rocks = createRocks(worldCircles, (x, z) => inBase(x, z, 5) || this.fleet.clearance(x, z, 3) || outpost(x, z, 2))
+    this.forest = createForest(this.renderer, worldCircles, (x, z) => inBase(x, z, PLATEAU_HALF - BASE_HALF + 10) || this.fleet.clearance(x, z, 5) || outpost(x, z, 6))
     this.scene.add(this.forest.group)
     this.scene.add(this.rocks.group)
     const bushCircles: Array<{ x: number; z: number; r: number }> = []
-    this.scene.add(createBushes(bushCircles, (x, z) => inBase(x, z, 4) || this.fleet.clearance(x, z, 2)))
-    this.scene.add(createClouds())
+    this.scene.add(createBushes(bushCircles, (x, z) => inBase(x, z, 4) || this.fleet.clearance(x, z, 2) || outpost(x, z, 0)))
 
     // Bases: blue in the south-west corner, red in the north-east; "ours" depends on the team
     this.bases = { blue: createBase('blue', this.colliders), red: createBase('red', this.colliders) }
@@ -225,12 +356,18 @@ export class BattlefieldGame {
     this.scene.add(this.turrets.group)
     worldCircles.push(...this.turrets.circles)
 
-    // Grass everywhere except inside the bases, under the guns and on the parking spots
-    this.grass = createGrass((x, z) =>
+    // The ground map (bare dirt, meadow, grass) the terrain and the grass share: no grass inside the bases,
+    // under the guns, on the parking spots or inside the outposts; trampled earth round outposts and vehicles
+    const noGrass = (x: number, z: number) =>
       inBase(x, z, 3) ||
       this.turrets.turrets.some((t) => Math.hypot(x - t.x, z - t.z) < 4) ||
-      this.fleet.clearance(x, z))
-    this.scene.add(this.grass.group)
+      this.fleet.clearance(x, z) ||
+      this.outposts.near(x, z, -4)
+    const worn = (x: number, z: number) => (this.outposts.near(x, z, 3) ? 0.6 : this.outposts.near(x, z, 7) ? 0.3 : 0) + (this.fleet.clearance(x, z, 1) ? 0.45 : 0)
+    this.groundMap = bakeGroundMap(noGrass, worn)
+    ;(this.terrain.userData.layers as { uGround: { value: THREE.Texture } }).uGround.value = this.groundMap.texture
+    this.noGrass = noGrass
+    this.plantGrass(PROFILES[quality])
 
     // Supplies (launchers, missile crates, ammo boxes, dropped weapons) and everything that flies
     this.items = createItems()
@@ -239,6 +376,13 @@ export class BattlefieldGame {
     this.scene.add(this.projectiles.group)
     this.decals = createDecals()
     this.scene.add(this.decals.group)
+    // Grenades bounce off walls, trunks, rocks, sandbags, barrels and vehicles on the ground
+    this.grenades = createGrenades({
+      colliders: this.colliders,
+      circles: () => [...worldCircles, ...this.fleet.circles(null), ...this.outposts.barrelCircles()],
+    })
+    this.grenades.onBounce = (at, speed) => this.audio.clink(at, speed)
+    this.scene.add(this.grenades.group)
     if (match.world) this.applyWorld(match.world)
 
     this.player = new Player(this.camera)
@@ -254,12 +398,12 @@ export class BattlefieldGame {
       this.player.pitch += def.kick * steady
       this.player.yaw += (Math.random() - 0.5) * def.kick * 0.4 * steady
     })
-    this.viewmodel = new Viewmodel(this.camera, muzzleFlashTexture())
+    this.viewmodel = new Viewmodel(this.camera, this.graphics.viewmodelRig, muzzleFlashTexture())
 
     // Everything that stops a bullet: terrain, bases, trees, rocks, vehicles, machine guns (player avatars are
     // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
-    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group]
-    this.sightBlockers = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group]
+    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group, this.outposts.blockers]
+    this.sightBlockers = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.outposts.blockers]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
@@ -269,7 +413,7 @@ export class BattlefieldGame {
     const enemy = TEAM_NAME[other(this.team)]
     setGameState({
       team: this.team,
-      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} gem and bring it to your ${TEAM_NAME[this.team]} gem. [F] switch weapon, [G] pick up / drop, [E] vehicles and machine guns.`,
+      message: `You are on the ${TEAM_NAME[this.team]} team. Steal the ${enemy} gem and bring it to your ${TEAM_NAME[this.team]} gem. [F] switch weapon, [Q] grenade, [G] pick up / drop, [E] vehicles and machine guns.`,
     })
     this.publishRoster()
     this.bindEvents()
@@ -281,7 +425,7 @@ export class BattlefieldGame {
     if (player.id === this.match.you) return
     let remote = this.remotes.get(player.id)
     if (!remote) {
-      remote = { info: player, avatar: null, target: null, snapped: false, speed: 0, diedInVehicle: false }
+      remote = { info: player, avatar: null, target: null, snapped: false, speed: 0, diedInVehicle: false, lastFiredAt: 0 }
       this.remotes.set(player.id, remote)
     }
     if (remote.avatar && remote.info.team !== player.team) {
@@ -331,18 +475,79 @@ export class BattlefieldGame {
   applyHp(id: string, hp: number, by: string) {
     if (id === this.match.you) {
       const took = hp < gameState.health
-      setGameState({ health: hp, damageTaken: gameState.damageTaken + (took ? 1 : 0) })
+      if (took) this.audio.ui('hurt')
+      setGameState({ health: hp, damageTaken: gameState.damageTaken + (took ? 1 : 0), ...(took ? { damageDir: this.damageDirection(by) } : {}) })
       this.publishRoster()
       return
     }
     const remote = this.remotes.get(id)
-    if (remote) remote.info.hp = hp
-    if (by === this.match.you && hp < 100) setGameState({ hitsLanded: gameState.hitsLanded + 1 })
+    if (remote) {
+      if (hp < remote.info.hp && hp > 0) remote.avatar?.flinch()
+      remote.info.hp = hp
+    }
+    if (by === this.match.you && hp < 100) {
+      setGameState({ hitsLanded: gameState.hitsLanded + 1 })
+      if (hp > 0) this.audio.ui('hit')
+    }
     this.publishRoster()
   }
 
-  playerKilled(id: string, by: string) {
+  /** Where damage came from, as an angle from where we look (0 = ahead, + = right): a blast next to us, or the shooter. */
+  private damageDirection(by: string): number | null {
+    const source = this.nearBlast && performance.now() - this.nearBlast.time < 400 ? this.nearBlast.at : this.whereIs(by)
+    if (!source) return null
+    const forward = this.camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize()
+    const to = source.clone().sub(this.camera.position).setY(0)
+    if (to.lengthSq() < 0.25) return null
+    return Math.atan2(to.x * -forward.z + to.z * forward.x, to.dot(forward))
+  }
+
+  /** Where a player is right now (their vehicle, their machine gun, their body). */
+  private whereIs(id: string): THREE.Vector3 | null {
+    const remote = this.remotes.get(id)
+    const s = remote?.target
+    if (!s) return null
+    if (s.vehicle) return new THREE.Vector3(...s.vehicle.p)
+    if (s.gun) {
+      const t = this.turrets.turrets.find((g) => g.id === s.gun!.id)
+      if (t) return new THREE.Vector3(t.x, heightAt(t.x, t.z) + 1.5, t.z)
+    }
+    return remote.avatar?.group.visible ? remote.avatar.group.position.clone() : new THREE.Vector3(...s.p)
+  }
+
+  /** A name for the kill feed. */
+  private feedName(id: string) {
+    if (id === this.match.you) return this.match.players.find((p) => p.id === id)?.displayName ?? 'You'
+    return this.remotes.get(id)?.info.displayName ?? '?'
+  }
+
+  private addKill(killer: string, victim: string, how: string) {
+    const entry = {
+      id: ++this.killCount,
+      killer: killer && killer !== victim ? this.feedName(killer) : '',
+      killerTeam: this.teamOf(killer),
+      victim: this.feedName(victim),
+      victimTeam: this.teamOf(victim),
+      how: howLabel(how),
+      mine: killer === this.match.you || victim === this.match.you,
+      at: performance.now(),
+    }
+    this.killFeed = [...this.killFeed, entry].slice(-KILL_FEED_SIZE)
+    setGameState({ killFeed: this.killFeed })
+  }
+
+  /** Old kill feed lines fade out. */
+  private pruneKillFeed() {
+    const now = performance.now()
+    if (!this.killFeed.length || now - this.killFeed[0].at < KILL_FEED_MS) return
+    this.killFeed = this.killFeed.filter((e) => now - e.at < KILL_FEED_MS)
+    setGameState({ killFeed: this.killFeed })
+  }
+
+  playerKilled(id: string, by: string, how = '') {
     const killer = this.nameOf(by)
+    this.addKill(by, id, how)
+    if (by === this.match.you && id !== this.match.you) this.audio.ui('kill')
     if (id === this.match.you) {
       this.die(killer)
       return
@@ -385,6 +590,7 @@ export class BattlefieldGame {
   remoteShot(id: string, to: Vec3, weapon: string) {
     const remote = this.remotes.get(id)
     if (!remote?.avatar || !remote.info.online || remote.info.dead || !remote.target) return
+    remote.lastFiredAt = performance.now()
     const end = new THREE.Vector3(...to)
     const s = remote.target
     let start: THREE.Vector3
@@ -396,10 +602,10 @@ export class BattlefieldGame {
       this.turrets.gunnerView(t, new THREE.Vector3(), start)
       t.recoil = 1
       heavy = true
-    } else if (weapon === CAR_GUN.id && s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
-      const car = this.fleet.byId.get(s.vehicle.id)!
-      start = this.fleet.carMuzzle(car, new THREE.Vector3())
-      car.gunRecoil = 1
+    } else if ((weapon === CAR_GUN.id || weapon === MECH_CANNON.id || weapon === HELI_GUN.id) && s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
+      const vehicle = this.fleet.byId.get(s.vehicle.id)!
+      start = this.fleet.carMuzzle(vehicle, new THREE.Vector3())
+      vehicle.gunRecoil = 1
       heavy = true
     } else if (remote.avatar.group.visible) {
       start = remote.avatar.fire()
@@ -411,12 +617,13 @@ export class BattlefieldGame {
     }
     const def = WEAPONS[weapon as WeaponKind] as (typeof WEAPONS)[WeaponKind] | undefined
     const round: RoundKind = heavy ? 'bullet_heavy' : def?.round ?? 'bullet_556'
-    const color = heavy ? (weapon === CAR_GUN.id ? CAR_GUN.color : MACHINE_GUN.color) : def?.color ?? 0xffd27a
+    const color = heavy ? (weapon === CAR_GUN.id ? CAR_GUN.color : weapon === MECH_CANNON.id ? MECH_CANNON.color : weapon === HELI_GUN.id ? HELI_GUN.color : MACHINE_GUN.color) : def?.color ?? 0xffd27a
     const dir = end.clone().sub(start)
     const distance = dir.length()
     dir.normalize()
     this.projectiles.round(round, start, end, color)
     this.projectiles.muzzleFlash(start, dir, heavy ? 1.6 : 0.7)
+    this.audio.shot(SHOT_SOUND[weapon] ?? 'rifle', start)
     // Re-trace the last stretch here to find the surface it struck
     const hit = new THREE.Raycaster(start, dir, 0.3, distance + 1).intersectObjects(this.targetList, true)[0]
     if (hit && hit.distance > distance - 1.5) this.applyImpact(hit, dir, heavy || (def?.power ?? 0) >= 40)
@@ -462,6 +669,9 @@ export class BattlefieldGame {
     let attach: THREE.Object3D | null = null
     for (let node: THREE.Object3D | null = hit.object; node; node = node.parent) {
       if (node.userData.playerId) { surface = 'robot'; hole = false; break }
+      // Explosive barrels: holes ride on the barrel (and go with it when it blows); sandbags just spit sand
+      if (node.userData.barrelId) { surface = 'metal'; attach = node; break }
+      if (node === this.outposts.blockers) { surface = 'dirt'; hole = false; break }
       const vehicleId = node.userData.vehicleId as string | undefined
       if (vehicleId) {
         surface = 'metal'
@@ -483,15 +693,118 @@ export class BattlefieldGame {
     }
     normal ??= this.hitNormal(hit, dir)
     this.projectiles.impact(point, normal, surface, heavy)
+    this.audio.impact(point, surface)
     // Ground holes sit a little higher: inside a base the concrete floor lies a few centimetres over the ground
     if (hole) this.decals.add('hole', point, normal, heavy ? 0.5 : 0.24 + Math.random() * 0.06, attach, hit.object === this.terrain ? 0.07 : 0.02)
   }
 
   /** Another player's anti-aircraft missile, homing on a helicopter (the server decides the hit). */
-  remoteMissile(_id: string, target: string, from: Vec3) {
+  remoteMissile(id: string, target: string, from: Vec3) {
     const vehicle = this.fleet.byId.get(target)
     if (!vehicle) return
-    this.projectiles.missile(new THREE.Vector3(from[0], from[1] + 0.2, from[2]), () => (vehicle.destroyed ? null : this.aimPoint(vehicle)))
+    const start = new THREE.Vector3(from[0], from[1] + 0.2, from[2])
+    const remote = this.remotes.get(id)
+    if (remote) remote.lastFiredAt = performance.now()
+    this.audio.shot('launch', start)
+    this.projectiles.missile(start, () => (vehicle.destroyed ? null : this.aimPoint(vehicle)))
+  }
+
+  /** Another player fired a tank shell or an unguided rocket: it flies there, and the server's blast follows. */
+  remoteFire(id: string, kind: ProjectileKind, from: Vec3, to: Vec3) {
+    const start = new THREE.Vector3(...from)
+    const end = new THREE.Vector3(...to)
+    const remote = this.remotes.get(id)
+    if (remote) remote.lastFiredAt = performance.now()
+    const dir = end.clone().sub(start).normalize()
+    if (kind === 'shell') {
+      const tank = remote?.target?.vehicle ? this.fleet.byId.get(remote.target.vehicle.id) : undefined
+      if (tank) tank.gunRecoil = 1
+      this.projectiles.shell(start, end)
+      this.projectiles.muzzleFlash(start, dir, 3.5)
+      this.projectiles.blastDust(new THREE.Vector3(start.x, heightAt(start.x, start.z), start.z), 3)
+      this.audio.shot('cannon', start)
+      return
+    }
+    this.projectiles.missile(start, () => end, undefined, false)
+    this.audio.shot('launch', start)
+  }
+
+  /** Another player threw a grenade: fly the same throw here (the server's blast ends it). */
+  remoteThrow(id: string, from: Vec3, velocity: Vec3) {
+    const remote = this.remotes.get(id)
+    if (remote) {
+      remote.lastFiredAt = performance.now()
+      remote.avatar?.throwGrenade()
+    }
+    this.grenades.throw(id, new THREE.Vector3(...from), new THREE.Vector3(...velocity), null)
+  }
+
+  /** The server says something blew up (it has already worked out who got hurt). */
+  blast(at: [number, number | null, number], kind: BlastKind, by: string) {
+    const point = new THREE.Vector3(at[0], at[1] ?? heightAt(at[0], at[2]) + 0.5, at[2])
+    if (kind === 'grenade' && by !== this.match.you) this.grenades.detonate(by)
+    // Our own shells, rockets and grenades already went off on our screen
+    if (by === this.match.you && kind !== 'barrel') return
+    this.explodeAt(point, kind)
+  }
+
+  /** An explosion here: fire and smoke, a scorch mark on the ground, a bang, and a shake if it is close. */
+  /** Light up the surroundings for a moment (a blast, a muzzle flash). */
+  private flashLight(at: THREE.Vector3, color: number, peak: number, seconds: number) {
+    const now = performance.now()
+    const slot = this.flashes.reduce((a, b) => (b.until < a.until ? b : a))
+    if (slot.until > now && slot.peak > peak) return
+    slot.light.position.copy(at)
+    slot.light.color.setHex(color)
+    slot.from = now
+    slot.until = now + seconds * 1000
+    slot.peak = peak
+  }
+
+  private updateFlashes() {
+    const now = performance.now()
+    for (const f of this.flashes) {
+      const left = f.until > now ? (f.until - now) / (f.until - f.from) : 0
+      f.light.intensity = f.peak * left * left
+    }
+  }
+
+  private explodeAt(at: THREE.Vector3, kind: BlastKind) {
+    const size = BLAST_SIZE[kind]
+    this.flashLight(at.clone().setY(Math.max(at.y, heightAt(at.x, at.z) + 1.5)), 0xff9a4a, 2200 * size, 0.45 + 0.15 * size)
+    const ground = heightAt(at.x, at.z)
+    const low = at.y - ground < 2.5
+    this.projectiles.explosion(at.clone().setY(Math.max(at.y, ground + 0.6)), size, low)
+    if (low) this.decals.add('scorch', new THREE.Vector3(at.x, ground, at.z), this.groundNormal(at.x, at.z), 2.4 + size * 2.2, null, 0.08)
+    if (kind === 'barrel') this.projectiles.burn(() => at, 7)
+    const d = at.distanceTo(this.camera.position)
+    this.shake = Math.min(1.4, this.shake + Math.max(0, 1 - d / (40 * size)) * size * 0.8)
+    if (d < 12) this.nearBlast = { at: at.clone(), time: performance.now() }
+    this.audio.explosion(at, size)
+  }
+
+  private groundNormal(x: number, z: number) {
+    const e = 0.6
+    return new THREE.Vector3(heightAt(x - e, z) - heightAt(x + e, z), 2 * e, heightAt(x, z - e) - heightAt(x, z + e)).normalize()
+  }
+
+  vehicleHpChanged(id: string, hp: number, max: number) {
+    const vehicle = this.fleet.byId.get(id)
+    if (!vehicle) return
+    if (hp < vehicle.hp) this.fleet.mech(vehicle)?.flinch()
+    vehicle.hp = Math.max(0, Math.min(max, hp))
+    if (vehicle === this.vehicle && hp < max * 0.25 && hp > 0 && !gameState.message.startsWith('Hull critical')) {
+      setGameState({ message: `Hull critical — get out of the ${label(vehicle)} before it blows!` })
+    }
+  }
+
+  /** An explosive barrel went up (its bullet holes go with it) or is back. */
+  barrelChanged(id: string, alive: boolean) {
+    if (!alive) {
+      const proxy = this.outposts.proxy(id)
+      if (proxy) this.decals.clear(proxy)
+    }
+    this.outposts.setBarrel(id, alive)
   }
 
   vehicleWrecked(id: string, by: string, at: { p: Vec3; r: Vec3 } | null) {
@@ -501,10 +814,16 @@ export class BattlefieldGame {
       vehicle.object.position.set(...at.p)
       vehicle.object.rotation.set(at.r[0], at.r[1], at.r[2])
     }
-    this.projectiles.explosion(this.aimPoint(vehicle), 2)
+    const center = vehicle.kind === 'heli' ? this.aimPoint(vehicle) : vehicle.object.localToWorld(new THREE.Vector3(0, 1.4, 0))
+    this.projectiles.explosion(center, 2, vehicle.kind !== 'heli')
+    this.flashLight(center, 0xff8a3a, 5000, 0.8)
+    this.audio.explosion(center, 2)
+    const d = center.distanceTo(this.camera.position)
+    this.shake = Math.min(1.4, this.shake + Math.max(0, 1 - d / 90) * 1.2)
     const p = vehicle.object.position
-    this.decals.add('scorch', new THREE.Vector3(p.x, heightAt(p.x, p.z), p.z), new THREE.Vector3(0, 1, 0), 9, null, 0.08)
+    this.decals.add('scorch', new THREE.Vector3(p.x, heightAt(p.x, p.z), p.z), this.groundNormal(p.x, p.z), 9, null, 0.08)
     vehicle.destroyed = true
+    vehicle.hp = 0
     if (this.vehicle === vehicle) {
       this.transition = null
       this.leaveVehicle()
@@ -513,7 +832,7 @@ export class BattlefieldGame {
     this.projectiles.burn(() => (vehicle.destroyed ? vehicle.object.position.clone().add(new THREE.Vector3(0, 1.5, 0)) : null), 30)
     if (this.lock.target === vehicle) this.lock = { target: null, time: 0 }
     const byName = by === this.match.you ? 'You' : this.nameOf(by)
-    setGameState({ message: `${byName} shot down a helicopter!` })
+    setGameState({ message: vehicle.kind === 'heli' ? `${byName} shot down a helicopter!` : `${byName} destroyed a ${label(vehicle)}!` })
   }
 
   vehicleRepaired(id: string) {
@@ -532,10 +851,12 @@ export class BattlefieldGame {
       vehicle.object.position.set(...pose.p)
       vehicle.object.rotation.set(pose.r[0], pose.r[1], pose.r[2])
     }
+    for (const vehicle of this.fleet.vehicles) vehicle.hp = world.vehicleHp[vehicle.id] ?? VEHICLE_MAX_HP[vehicle.kind]
     for (const id of world.wrecks) {
       const vehicle = this.fleet.byId.get(id)
       if (vehicle) vehicle.destroyed = true
     }
+    for (const barrel of world.barrels) this.outposts?.setBarrel(barrel.id, barrel.alive)
     this.items?.reset(world.items)
   }
 
@@ -551,6 +872,7 @@ export class BattlefieldGame {
   took(took: Took) {
     this.pendingTake = null
     if (!took.kind) return
+    if (took.weapon || took.count > 0) this.audio.ui('pickup')
     const name = itemLabel(took.kind)
     if (took.weapon && isWeaponItem(took.kind)) {
       if (this.arsenal.inSlotOf(took.kind)) return
@@ -605,6 +927,8 @@ export class BattlefieldGame {
     this.dead = true
     this.deathCamRoll = 0
     this.transition = null
+    this.throwTimer = 0
+    this.pendingHijack = null
     this.leaveTurret()
     this.leaveVehicle()
     // What we carried is on the ground where we fell (the server dropped it); we respawn with fresh guns
@@ -633,14 +957,51 @@ export class BattlefieldGame {
     this.camera.rotation.set(THREE.MathUtils.lerp(this.camera.rotation.x, 0.25, k), this.player.yaw, this.deathCamRoll)
   }
 
-  /** The sun's shadow box follows the camera (snapped to whole shadow texels so edges don't shimmer). */
+  /** Lower settings: the sun's shadow box follows the camera. The sky dome stays centred on it. */
   private updateShadowArea() {
-    const texel = (SHADOW_RANGE * 2) / this.sun.shadow.mapSize.x
-    const x = Math.round(this.camera.position.x / texel) * texel
-    const z = Math.round(this.camera.position.z / texel) * texel
-    this.sun.target.position.set(x, 0, z)
-    this.sun.position.set(x + SUN_OFFSET.x, SUN_OFFSET.y, z + SUN_OFFSET.z)
-    this.sun.target.updateMatrixWorld()
+    this.sky.follow(this.camera.position)
+    this.sky.update(this.camera)
+  }
+
+  /** Is the camera in sunlight? (Hills, buildings and rocks between it and the sun put it in shade.) */
+  private inSunlight() {
+    const eye = this.camera.position
+    for (let d = 4; d < 320; d += 4) {
+      const x = eye.x + SUN_DIRECTION.x * d, y = eye.y + SUN_DIRECTION.y * d, z = eye.z + SUN_DIRECTION.z * d
+      if (heightAt(x, z) > y) return false
+      if (y > 60) break
+    }
+    this.shadeRay.set(eye, SUN_DIRECTION)
+    this.shadeRay.far = 80
+    return this.shadeRay.intersectObjects([this.ourBase.group, this.enemyBase.group, this.rocks.group], true).length === 0
+  }
+
+  /** Graphics settings (Ultra / High / Medium / Low), applied straight away and remembered. */
+  setQuality(quality: Quality) {
+    if (quality === this.graphics.quality) return
+    saveQuality(quality)
+    this.graphics.setQuality(quality)
+    this.sky.setProfile(PROFILES[quality])
+    this.plantGrass(PROFILES[quality])
+    setGameState({ quality })
+  }
+
+  /** Blade-by-blade grass round the camera (or, on Low, the lighter grass clumps). */
+  private plantGrass(profile: QualityProfile) {
+    if (this.blades) {
+      this.scene.remove(this.blades.mesh)
+      this.blades.dispose()
+      this.blades = null
+    }
+    if (profile.grassBlades > 0) {
+      this.blades = createGrassBlades(profile.grassBlades, profile.grassRadius, this.groundMap.texture)
+      this.scene.add(this.blades.mesh)
+      if (this.grass) this.grass.group.visible = false
+    } else {
+      this.grass ??= createGrass(this.noGrass)
+      if (!this.grass.group.parent) this.scene.add(this.grass.group)
+      this.grass.group.visible = true
+    }
   }
 
   /** A remote player got out, left or died: their seat is free, the vehicle stays where it is. */
@@ -662,21 +1023,33 @@ export class BattlefieldGame {
     }
   }
 
-  /** Map a raycast hit back to an enemy player and report it; the server applies the damage. */
+  /**
+   * Map a raycast hit back to what it struck and report it; the server applies the damage. Enemy players; a
+   * vehicle's hull and the enemies inside (the pilot / driver first — a tank shrugs bullets off, and a
+   * teammate's ride is left alone); explosive barrels.
+   */
   private reportHit(object: THREE.Object3D, weapon: string) {
     for (let node: THREE.Object3D | null = object; node; node = node.parent) {
       const playerId = node.userData.playerId as string | undefined
       if (playerId) {
         const remote = this.remotes.get(playerId)
-        if (remote && remote.info.team !== this.team && !remote.info.dead) this.match.net.sendHit(playerId, weapon)
+        if (remote && remote.info.team !== this.team && !remote.info.dead) this.match.net.sendHit(weapon, { target: playerId })
+        return
+      }
+      const barrelId = node.userData.barrelId as string | undefined
+      if (barrelId) {
+        if (this.outposts.alive(barrelId)) this.match.net.sendHit(weapon, { barrel: barrelId })
         return
       }
       const vehicleId = node.userData.vehicleId as string | undefined
       if (vehicleId) {
-        // Shooting a vehicle hurts the enemies inside it (the pilot / driver first)
         const vehicle = this.fleet.byId.get(vehicleId)
-        const victim = vehicle?.occupants.find((id) => id && id !== this.match.you && this.teamOf(id) !== this.team && !this.remotes.get(id)?.info.dead)
-        if (victim) this.match.net.sendHit(victim, weapon)
+        if (!vehicle || vehicle.destroyed || vehicle.kind === 'tank') return
+        const aboard = vehicle.occupants.filter((id): id is string => !!id && id !== this.match.you)
+        const friends = aboard.some((id) => this.teamOf(id) === this.team)
+        const victim = aboard.find((id) => this.teamOf(id) !== this.team && !this.remotes.get(id)?.info.dead)
+        if (friends && !victim) return
+        this.match.net.sendHit(weapon, { ...(friends ? {} : { vehicle: vehicleId }), ...(victim ? { target: victim } : {}) })
         return
       }
     }
@@ -693,7 +1066,7 @@ export class BattlefieldGame {
       if (Math.abs(avatar.position.y - feetY) > PLAYER_BLOCK_HEIGHT) continue
       obstacles.push({ x: avatar.position.x, z: avatar.position.z, r: PLAYER_BLOCK_RADIUS })
     }
-    obstacles.push(...this.fleet.circles(this.vehicle))
+    obstacles.push(...this.fleet.circles(this.vehicle), ...this.outposts.barrelCircles())
     return obstacles
   }
 
@@ -733,7 +1106,7 @@ export class BattlefieldGame {
         ? {
           id: vehicle.id, seat: this.seat, p: [pose.position.x, pose.position.y, pose.position.z], r: [pose.rotation.x, pose.rotation.y, pose.rotation.z],
           spin: vehicle.kind === 'heli' ? vehicle.spin : this.carSpeed,
-          ...(vehicle.kind === 'car' && this.seat === 0 ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
+          ...((vehicle.kind === 'heli' ? this.seat === 1 : this.seat === 0) ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
         }
         : null,
       gun: t ? { id: t.id, yaw: t.yaw, pitch: t.pitch } : null,
@@ -777,7 +1150,7 @@ export class BattlefieldGame {
       avatar.visible = !s.vehicle
       remote.avatar.carriedGem.visible = s.flag
       remote.avatar.setWeapon(s.gun || s.vehicle ? null : (s.w || null))
-      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance)
+      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance, feet.y - heightAt(feet.x, feet.z) > 0.45)
       this.syncRemoteVehicle(remote.info.id, s, k)
       // On a machine gun: the gun follows their aim on our screen too
       if (s.gun) {
@@ -817,6 +1190,11 @@ export class BattlefieldGame {
     if (claimed.occupants[seat] !== playerId) {
       claimed.occupants[seat] = playerId
       claimed.doorHold[seat] = performance.now() + DOOR_HOLD_MS
+    }
+    // The gunner of a helicopter works its nose gun
+    if (claimed.kind === 'heli' && seat === 1 && s.vehicle.aim && !(claimed === this.vehicle && this.seat === 1)) {
+      claimed.aimYaw = lerpAngle(claimed.aimYaw, s.vehicle.aim[0], k)
+      claimed.aimPitch = THREE.MathUtils.lerp(claimed.aimPitch, s.vehicle.aim[1], k)
     }
     if (seat !== 0 || claimed === this.vehicle) return
     const pose = claimed.object
@@ -890,6 +1268,8 @@ export class BattlefieldGame {
 
     add(this.renderer.domElement, 'click', () => {
       this.renderer.domElement.requestPointerLock()
+      // Browsers only let a page make sound once the player has done something
+      this.audio.unlock()
     })
 
     add(document, 'pointerlockchange', () => {
@@ -948,7 +1328,11 @@ export class BattlefieldGame {
         case 'KeyV':
           if (!e.repeat) this.cycleVehicleCamera()
           break
+        case 'KeyQ':
+          if (!e.repeat) this.throwGrenade()
+          break
       }
+      this.audio.unlock()
     }) as EventListener)
 
     add(document, 'keyup', ((e: KeyboardEvent) => {
@@ -971,7 +1355,7 @@ export class BattlefieldGame {
       const h = this.container.clientHeight
       this.camera.aspect = w / h
       this.camera.updateProjectionMatrix()
-      this.renderer.setSize(w, h)
+      this.graphics.setSize(w, h)
     }) as EventListener)
   }
 
@@ -1055,12 +1439,77 @@ export class BattlefieldGame {
       setGameState({ message: `That ${label(vehicle)} is a burnt-out wreck.` })
       return
     }
+    if (this.enemiesAboard(vehicle).length) {
+      // Enemies inside: pull them out if it's standing still on the ground, and take it
+      if (!this.grounded(vehicle)) {
+        setGameState({ message: vehicle.kind === 'heli' ? 'The enemy is flying it — shoot it down or wait for it to land.' : `The enemy is driving that ${label(vehicle)} — stop it first.` })
+        return
+      }
+      if (this.pendingHijack && this.pendingHijack.until > performance.now()) return
+      this.pendingHijack = { vehicle, until: performance.now() + 2000 }
+      this.match.net.sendHijack(vehicle.id)
+      setGameState({ message: `Pulling the enemy out of the ${label(vehicle)}…` })
+      return
+    }
     const seat = vehicle.occupants.findIndex((o) => o === null)
     if (seat < 0) {
-      setGameState({ message: vehicle.kind === 'heli' ? 'That helicopter is full.' : `That battle car is being driven by ${this.nameOf(driverOf(vehicle)!)}.` })
+      setGameState({ message: vehicle.kind === 'heli' ? 'That helicopter is full.' : `That ${label(vehicle)} is being driven by ${this.nameOf(driverOf(vehicle)!)}.` })
       return
     }
     this.enterVehicle(vehicle, seat)
+  }
+
+  /** Enemy players sitting in a vehicle. */
+  private enemiesAboard(vehicle: Vehicle) {
+    return vehicle.occupants.filter((id): id is string => !!id && id !== this.match.you && this.teamOf(id) !== this.team && !this.remotes.get(id)?.info.dead)
+  }
+
+  /** Standing still on the ground (a helicopter landed, a car or tank not driving off). */
+  private grounded(vehicle: Vehicle) {
+    const p = vehicle.object.position
+    if (vehicle.kind === 'heli') return p.y - this.fleet.restHeight(vehicle, p.x, p.z) < 1.5
+    if (vehicle.kind === 'mech') return p.y - heightAt(p.x, p.z) < MECH_AIRBORNE && Math.abs(vehicle.spin) < 4
+    return Math.abs(vehicle.spin) < 4
+  }
+
+  /** The server pulled the enemies out (or not): climb in. */
+  hijackAnswer(vehicleId: string, ok: boolean, reason: string) {
+    const pending = this.pendingHijack
+    if (!pending || pending.vehicle.id !== vehicleId) return
+    this.pendingHijack = null
+    const vehicle = pending.vehicle
+    if (!ok) {
+      const why: Record<string, string> = {
+        moving: `The ${label(vehicle)} is moving — stop it first.`,
+        far: `Get closer to the ${label(vehicle)}.`,
+        locked: 'You were just pulled out of it — give it a moment.',
+        wreck: `That ${label(vehicle)} is a burnt-out wreck.`,
+      }
+      setGameState({ message: why[reason] ?? `You can't take that ${label(vehicle)} right now.` })
+      return
+    }
+    if (!this.onFoot || vehicle.destroyed) return
+    // The pilot's / driver's seat if it is free now, else the first free one
+    const seat = vehicle.occupants[0] === null ? 0 : vehicle.occupants.findIndex((o) => o === null)
+    if (seat < 0) return
+    this.enterVehicle(vehicle, seat)
+  }
+
+  /** Someone pulled the enemies out of a vehicle: their seats are empty now. */
+  vehicleHijacked(vehicleId: string, by: string, victims: string[]) {
+    const vehicle = this.fleet.byId.get(vehicleId)
+    if (!vehicle) return
+    for (const id of victims) {
+      const seat = vehicle.occupants.indexOf(id)
+      if (seat >= 0) vehicle.occupants[seat] = null
+      const remote = this.remotes.get(id)
+      if (remote?.target) remote.target = { ...remote.target, vehicle: null }
+    }
+    if (by === this.match.you) {
+      setGameState({ message: `You pulled ${victims.map((id) => this.nameOf(id)).join(' and ')} out — the ${label(vehicle)} is yours!` })
+    } else if (this.teamOf(by) === this.team && !victims.includes(this.match.you)) {
+      setGameState({ message: `${this.nameOf(by)} took an enemy ${label(vehicle)}!` })
+    }
   }
 
   /** The nearest vehicle (any team's) or machine gun we could use. */
@@ -1087,15 +1536,31 @@ export class BattlefieldGame {
     if (choice.turret) return choice.turret.occupant ? `Machine gun (manned by ${this.nameOf(choice.turret.occupant)})` : 'Man the machine gun'
     const vehicle = choice.vehicle!
     if (vehicle.destroyed) return `Wrecked ${label(vehicle)}`
+    const enemies = this.enemiesAboard(vehicle)
+    if (enemies.length) {
+      if (!this.grounded(vehicle)) return vehicle.kind === 'heli' ? 'Enemy helicopter in the air — shoot it down' : `Enemy ${label(vehicle)} on the move`
+      return `Pull ${this.nameOf(enemies[0])}${enemies.length > 1 ? ` and ${enemies.length - 1} more` : ''} out and take the ${label(vehicle)}`
+    }
     const seat = vehicle.occupants.findIndex((o) => o === null)
-    if (seat < 0) return vehicle.kind === 'heli' ? 'Helicopter (full)' : 'Battle car (taken)'
+    if (seat < 0) return vehicle.kind === 'heli' ? 'Helicopter (full)' : `${label(vehicle)[0].toUpperCase()}${label(vehicle).slice(1)} (taken)`
     if (vehicle.kind === 'car') return 'Drive battle car'
-    return seat === 0 ? 'Fly helicopter (pilot seat)' : 'Board helicopter (passenger — you can shoot)'
+    if (vehicle.kind === 'tank') return 'Drive tank'
+    if (vehicle.kind === 'mech') return 'Pilot the combat mech'
+    return seat === 0 ? 'Fly helicopter (pilot seat)' : seat === 1 ? 'Board helicopter (gunner — nose gun)' : 'Board helicopter (door gunner — your own weapons)'
   }
 
-  /** Eye position of a seat, in the vehicle's local space. */
+  /** Eye position of a seat, in the vehicle's local space (a tank's gunner sight turns with the turret). */
   private seatEye(vehicle: Vehicle, seat: number) {
-    return vehicle.kind === 'heli' ? this.fleet.heliSeats[seat].eye.clone() : CAR_GUNNER_SEAT.clone()
+    if (vehicle.kind === 'heli') return this.fleet.heliSeats[seat].eye.clone()
+    if (vehicle.kind === 'tank') return TANK_SIGHT.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), vehicle.aimYaw).add(TANK_TURRET_PIVOT)
+    if (vehicle.kind === 'mech') {
+      // The cockpit rides on the torso (it twists and bobs as the mech walks)
+      const rig = this.fleet.mech(vehicle)
+      if (!rig) return new THREE.Vector3(0, 6.5, 1.7)
+      vehicle.object.updateMatrixWorld()
+      return vehicle.object.worldToLocal(rig.cockpit(new THREE.Vector3()))
+    }
+    return CAR_GUNNER_SEAT.clone()
   }
 
   private enterVehicle(vehicle: Vehicle, seat: number) {
@@ -1129,8 +1594,25 @@ export class BattlefieldGame {
         seat,
         message: seat === 0
           ? 'You are the pilot (pilots can\'t shoot). SPACE spins up the rotor, W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll, V camera, E to get out.'
-          : 'Passenger seat: the door stays open — aim with the mouse and shoot. E to get out.',
+          : seat === 1 ? 'Gunner seat: the nose gun follows your aim — LMB fires. E to get out.' : 'Door gunner: lean out of the cabin door — aim with the mouse and shoot. E to get out.',
       })
+    } else if (vehicle.kind === 'mech') {
+      this.carSpeed = 0
+      vehicle.targetSpin = 0
+      this.mechVy = 0
+      this.mechJet = 1
+      this.cameraMode = 'chase'
+      this.player.yaw = yaw + vehicle.aimYaw + Math.PI
+      this.mechSalvo = { left: MECH_SALVO, next: 0, reloadUntil: performance.now() + 1200 }
+      setGameState({ vehicle: 'mech', seat: 0, message: 'COMBAT MECH: W/S walk (Shift runs), A/D turn, SPACE jump-jets — the torso follows your aim. LMB autocannon, RMB rocket salvo, V cockpit view, E to get out.' })
+    } else if (vehicle.kind === 'tank') {
+      this.carSpeed = 0
+      vehicle.targetSpin = 0
+      this.cameraMode = 'chase'
+      // Look where the turret points
+      this.player.yaw = yaw + vehicle.aimYaw + Math.PI
+      this.cannonCooldown = Math.max(this.cannonCooldown, 1)
+      setGameState({ vehicle: 'tank', seat: 0, message: 'TANK: W/S drive, A/D turn the hull, the turret follows your aim. LMB fires the cannon (3 s reload), V gunner sight, E to get out.' })
     } else {
       this.carSpeed = 0
       vehicle.targetSpin = 0
@@ -1164,7 +1646,7 @@ export class BattlefieldGame {
       return
     }
     this.leaveVehicle()
-    const side = 3.6
+    const side = vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : 3.6
     const circles = [...this.solidCircles, ...this.fleet.circles(null)]
     const clear = (spot: THREE.Vector3) => circles.every((c) => Math.hypot(c.x - spot.x, c.z - spot.z) > c.r + 0.7)
     const candidates = [new THREE.Vector3(side, 0, 0), new THREE.Vector3(-side, 0, 0), new THREE.Vector3(0, 0, -side * 2), new THREE.Vector3(0, 0, side * 2)]
@@ -1185,31 +1667,39 @@ export class BattlefieldGame {
     if (vehicle.occupants[this.seat] === this.match.you) vehicle.occupants[this.seat] = null
     if (this.seat === 0) {
       vehicle.targetSpin = 0
+      // A car rolls on; a tank's tracks stop it where it is
       if (vehicle.kind === 'car') vehicle.spin = this.carSpeed
+      if (vehicle.kind === 'tank' || vehicle.kind === 'mech') vehicle.spin = 0
     }
     this.carSpeed = 0
     this.seat = 0
     vehicle.hitbox.traverse((node) => node.layers.set(0))
     this.camera.rotation.order = 'YXZ'
-    setGameState({ vehicle: null, seat: 0, rotorRpm: 0, speedKmh: 0 })
+    setGameState({ vehicle: null, seat: 0, rotorRpm: 0, speedKmh: 0, cannon: -1, gunX: -1, gunY: -1, tankSight: false })
     this.publishRoster()
   }
 
-  /** The server says another player got into this seat first (or it was shot down). */
-  ejectFrom(vehicleId: string) {
+  /** The server says we have to leave: someone got into this seat first, it was shot down, or `by` pulled us out. */
+  ejectFrom(vehicleId: string, by: string | null = null, reason = 'taken') {
     if (this.vehicle?.id !== vehicleId) return
     this.transition = null
     const vehicle = this.vehicle
+    const seat = this.seat
     this.leaveVehicle()
-    const spot = vehicle.object.localToWorld(new THREE.Vector3(3.5, 0, 0))
+    // Out through our own door (a helicopter) or beside it
+    const local = vehicle.kind === 'heli' ? this.fleet.heliSeats[seat].outside.clone().setY(0).multiplyScalar(1.2) : new THREE.Vector3(vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : 3.5, 0, 0)
+    const spot = vehicle.object.localToWorld(local)
     this.player.position.set(spot.x, Math.max(vehicle.object.position.y, heightAt(spot.x, spot.z)) + EYE_HEIGHT, spot.z)
-    setGameState({ message: 'Someone else got into that seat first.' })
+    this.player.velocity.set(0, 0, 0)
+    this.player.pitch = 0
+    const why = reason === 'locked' ? `You were just pulled out of that ${label(vehicle)} — give it a moment.` : reason === 'wreck' ? `That ${label(vehicle)} is a wreck.` : 'Someone else got into that seat first.'
+    setGameState({ message: by ? `${this.nameOf(by)} pulled you out of the ${label(vehicle)}!` : why })
   }
 
   private cycleVehicleCamera() {
     if (!this.vehicle || this.seat !== 0 || this.transition) return
     this.cameraMode = this.cameraMode === 'inside' ? 'chase' : 'inside'
-    const inside = this.vehicle.kind === 'heli' ? 'COCKPIT VIEW' : 'ROOF GUN'
+    const inside = this.vehicle.kind === 'heli' || this.vehicle.kind === 'mech' ? 'COCKPIT VIEW' : this.vehicle.kind === 'tank' ? 'GUNNER SIGHT' : 'ROOF GUN'
     setGameState({ message: `${this.cameraMode === 'inside' ? inside : 'CHASE VIEW'} — press V to change camera.` })
   }
 
@@ -1245,11 +1735,14 @@ export class BattlefieldGame {
     if (!vehicle || this.transition) return
     if (this.seat === 0) {
       if (vehicle.kind === 'heli') this.updateHelicopter(vehicle, dt)
+      else if (vehicle.kind === 'tank') this.updateTank(vehicle, dt)
+      else if (vehicle.kind === 'mech') this.updateMech(vehicle, dt)
       else this.updateCar(vehicle, dt)
     }
-    // The camera turns with the vehicle; the mouse looks around on top of that
+    // The camera turns with the vehicle and the mouse looks around on top of that (a tank's turret doesn't
+    // turn with its hull: the view stays where you aim)
     const yaw = vehicle.object.rotation.y
-    this.player.yaw += wrap(yaw - this.lastVehicleYaw)
+    if (vehicle.kind !== 'tank' && vehicle.kind !== 'mech') this.player.yaw += wrap(yaw - this.lastVehicleYaw)
     this.lastVehicleYaw = yaw
     // We ride along: our position is the seat (what others use for range checks, where we get out)
     const seat = vehicle.object.localToWorld(this.seatEye(vehicle, this.seat))
@@ -1264,12 +1757,13 @@ export class BattlefieldGame {
       this.camera.position.lerp(new THREE.Vector3(p.x + back.x, p.y + 8, p.z + back.z), Math.min(1, dt * 4))
       this.camera.lookAt(p.x, p.y + 3, p.z)
     } else {
-      // Chase camera orbits the car with the mouse
+      // Chase camera orbits the car / tank / mech with the mouse
+      const tank = vehicle.kind === 'tank', mech = vehicle.kind === 'mech'
       const pitch = THREE.MathUtils.clamp(this.player.pitch, -0.9, 0.3)
       this.player.pitch = pitch
-      const target = vehicle.object.position.clone().add(new THREE.Vector3(0, 2.6, 0))
+      const target = vehicle.object.position.clone().add(new THREE.Vector3(0, mech ? 7.5 : tank ? 4 : 2.6, 0))
       const forward = new THREE.Vector3(-Math.sin(this.player.yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(this.player.yaw) * Math.cos(pitch))
-      const eye = target.addScaledVector(forward, -11)
+      const eye = target.addScaledVector(forward, mech ? -17 : tank ? -15.5 : -11)
       eye.y = Math.max(eye.y, heightAt(eye.x, eye.z) + 0.8)
       this.camera.position.copy(eye)
       this.camera.rotation.set(pitch, this.player.yaw, 0)
@@ -1357,20 +1851,249 @@ export class BattlefieldGame {
     setGameState({ speedKmh: Math.round(Math.abs(speed) * 3.6) })
   }
 
-  /** Would the car's footprint (two circles along its length) at (x, z, yaw) hit something? */
+  /**
+   * Tank: W/S drive (slow to get going, quick to stop), A/D turn the hull on its tracks — on the spot too.
+   * It follows the ground and stops against trees, rocks, walls and other vehicles.
+   */
+  private updateTank(tank: Vehicle, dt: number) {
+    const throttle = (this.input.forward ? 1 : 0) - (this.input.back ? 1 : 0)
+    const turnInput = (this.input.left ? 1 : 0) - (this.input.right ? 1 : 0)
+    const toward = (value: number, target: number, step: number) => (value > target ? Math.max(target, value - step) : Math.min(target, value + step))
+    let speed = this.carSpeed
+    if (this.input.jump) speed = toward(speed, 0, TANK_BRAKE * dt)
+    else if (throttle > 0) speed = speed < -0.2 ? toward(speed, 0, TANK_BRAKE * dt) : speed + TANK_ACCEL * (1 - 0.4 * Math.max(0, speed) / TANK_MAX_SPEED) * dt
+    else if (throttle < 0) speed = speed > 0.2 ? toward(speed, 0, TANK_BRAKE * dt) : speed - TANK_ACCEL * 0.7 * dt
+    else speed = toward(speed, 0, TANK_BRAKE * 0.45 * dt)
+    // Uphill slows it, downhill helps a little
+    speed += 9.8 * Math.sin(tank.object.rotation.x) * 0.35 * dt
+    speed = THREE.MathUtils.clamp(speed, -TANK_REVERSE_SPEED, TANK_MAX_SPEED)
+    const turn = turnInput * TANK_TURN * (1 - 0.3 * Math.min(1, Math.abs(speed) / TANK_MAX_SPEED)) * dt
+    const yaw = tank.object.rotation.y + turn
+    const x = tank.object.position.x + Math.sin(yaw) * speed * dt
+    const z = tank.object.position.z + Math.cos(yaw) * speed * dt
+    if (this.carBlocked(tank, x, z, yaw)) {
+      speed = -speed * 0.15
+      const here = tank.object.position
+      if (!this.carBlocked(tank, here.x, here.z, yaw)) {
+        // Can't go on, but it can still turn where it stands
+        tank.object.rotation.y = yaw
+      } else if (this.carBlocked(tank, here.x, here.z, tank.object.rotation.y) && !this.carBlocked(tank, x, z, yaw, false)) {
+        // Something moved into us: let it drive out
+        here.set(x, here.y, z)
+        tank.object.rotation.y = yaw
+      }
+    } else {
+      tank.object.position.set(x, tank.object.position.y, z)
+      tank.object.rotation.y = yaw
+    }
+    this.carSpeed = speed
+    tank.spin = speed
+    this.carGroundPose(tank)
+    setGameState({ speedKmh: Math.round(Math.abs(speed) * 3.6) })
+  }
+
+  /**
+   * Combat mech: W/S walk (Shift runs, S backs up), A/D turn on the spot or on the move, SPACE fires the
+   * jump-jets (a few seconds of fuel that refills on the ground). Stops against trees, rocks, walls and vehicles;
+   * a hard landing shakes the view.
+   */
+  private updateMech(mech: Vehicle, dt: number) {
+    const throttle = (this.input.forward ? 1 : 0) - (this.input.back ? 1 : 0)
+    const turnInput = (this.input.left ? 1 : 0) - (this.input.right ? 1 : 0)
+    const p = mech.object.position
+    const ground = heightAt(p.x, p.z)
+    const airborne = p.y - ground > 0.05 || this.mechVy > 0
+    const target = throttle > 0 ? (this.input.sprint ? MECH_RUN : MECH_WALK) : throttle < 0 ? -MECH_BACK : 0
+    // Legs can't change pace in the air: it keeps its momentum
+    let speed = this.carSpeed
+    if (!airborne) speed += THREE.MathUtils.clamp(target - speed, -MECH_ACCEL * 1.6 * dt, MECH_ACCEL * dt)
+    const yaw = mech.object.rotation.y + turnInput * MECH_TURN * (airborne ? 0.5 : 1) * dt
+    // Jump-jets
+    if (this.input.jump && this.mechJet > 0.02) {
+      this.mechVy += MECH_JET_THRUST * dt
+      this.mechJet = Math.max(0, this.mechJet - dt / MECH_JET_TIME)
+    } else if (!airborne) {
+      this.mechJet = Math.min(1, this.mechJet + MECH_JET_REFILL * dt)
+    }
+    if (airborne || this.mechVy > 0) this.mechVy -= MECH_GRAVITY * dt
+    this.mechVy = THREE.MathUtils.clamp(this.mechVy, -35, 10)
+    let x = p.x + Math.sin(yaw) * speed * dt
+    let z = p.z + Math.cos(yaw) * speed * dt
+    if (this.carBlocked(mech, x, z, yaw)) {
+      speed = -speed * 0.1
+      x = p.x
+      z = p.z
+    }
+    let y = p.y + this.mechVy * dt
+    const groundThere = heightAt(x, z)
+    if (y <= groundThere) {
+      if (this.mechVy < -9) {
+        // Hard landing
+        this.shake = Math.min(1.2, this.shake + Math.min(1, -this.mechVy / 25))
+        this.audio.explosion(new THREE.Vector3(x, groundThere, z), 0.35)
+        this.projectiles.blastDust(new THREE.Vector3(x, groundThere, z), 4)
+      }
+      y = groundThere
+      this.mechVy = 0
+    }
+    p.set(x, y, z)
+    mech.object.rotation.set(0, yaw, 0)
+    this.carSpeed = speed
+    mech.spin = speed
+    // Footfalls: a thud and a little shake at every step
+    if (!airborne && Math.abs(speed) > 0.4) {
+      this.mechStep += Math.abs(speed) * dt
+      if (this.mechStep > MECH_STRIDE) {
+        this.mechStep = 0
+        this.audio.impact(new THREE.Vector3(x, groundThere, z), 'dirt')
+        this.shake = Math.min(0.5, this.shake + 0.12)
+      }
+    }
+    setGameState({ speedKmh: Math.round(Math.abs(speed) * 3.6), jet: Math.round(this.mechJet * 50) / 50 })
+  }
+
+  /**
+   * The mech's weapons: the torso turns towards whatever the crosshair is on (the gun arm follows it up and down),
+   * LMB fires the arm autocannon (heavy rounds, fast), RMB lets go a salvo of rockets from the shoulder pods.
+   */
+  private updateMechGun(mech: Vehicle, dt: number) {
+    const rig = this.fleet.mech(mech)
+    const origin = this.camera.getWorldPosition(new THREE.Vector3())
+    const view = this.camera.getWorldDirection(new THREE.Vector3())
+    const targets = this.shootTargets()
+    const now = performance.now()
+    if (now - this.mechAim.at > 70 || this.mouse.shooting) {
+      const sight = new THREE.Raycaster(origin, view, 4, MECH_CANNON.range).intersectObjects(targets, true)[0]
+      this.mechAim.distance = sight?.distance ?? MECH_CANNON.range
+      this.mechAim.at = now
+    }
+    const aim = origin.clone().addScaledVector(view, this.mechAim.distance)
+    mech.object.updateMatrixWorld()
+    const local = mech.object.worldToLocal(aim.clone())
+    const wantYaw = THREE.MathUtils.clamp(Math.atan2(local.x, local.z), -MECH_TWIST_LIMIT, MECH_TWIST_LIMIT)
+    const wantPitch = THREE.MathUtils.clamp(Math.atan2(local.y - MECH_AIM_HEIGHT, Math.max(2, Math.hypot(local.x, local.z))), -MECH_PITCH.down, MECH_PITCH.up)
+    const step = MECH_TWIST_SPEED * dt
+    mech.aimYaw += THREE.MathUtils.clamp(wantYaw - mech.aimYaw, -step, step)
+    mech.aimPitch += THREE.MathUtils.clamp(wantPitch - mech.aimPitch, -step, step)
+    const salvo = this.mechSalvo
+    if (salvo.left === 0 && now > salvo.reloadUntil) salvo.left = MECH_SALVO
+    setGameState({ cannon: salvo.left > 0 ? 1 : Math.round((1 - (salvo.reloadUntil - now) / (MECH_SALVO_RELOAD * 1000)) * 50) / 50 })
+    if (!rig) return
+
+    // Autocannon: from the arm's muzzle straight at what the crosshair is on
+    this.mechGunCooldown = Math.max(0, this.mechGunCooldown - dt)
+    if (this.mouse.shooting && this.mechGunCooldown <= 0) {
+      this.mechGunCooldown = MECH_CANNON.fireRate
+      const muzzle = new THREE.Vector3(), barrel = new THREE.Vector3()
+      rig.gun(muzzle, barrel)
+      const dir = aim.clone().sub(muzzle).normalize()
+      dir.add(new THREE.Vector3((Math.random() - 0.5) * MECH_CANNON.spread, (Math.random() - 0.5) * MECH_CANNON.spread, (Math.random() - 0.5) * MECH_CANNON.spread)).normalize()
+      const hits = new THREE.Raycaster(muzzle.clone().addScaledVector(dir, 0.5), dir, 0, MECH_CANNON.range).intersectObjects(targets, true)
+      const end = hits[0]?.point.clone() ?? muzzle.clone().addScaledVector(dir, MECH_CANNON.range)
+      this.projectiles.round('bullet_heavy', muzzle, end, MECH_CANNON.color)
+      this.projectiles.muzzleFlash(muzzle, dir, 1.8)
+      this.audio.shot('heavy', null)
+      this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(barrel, -1.4), dir)
+      mech.gunRecoil = 1
+      this.shake = Math.min(0.35, this.shake + 0.05)
+      this.match.net.sendShot([end.x, end.y, end.z], MECH_CANNON.id)
+      if (hits[0]) {
+        this.applyImpact(hits[0], dir, true)
+        this.reportHit(hits[0].object, MECH_CANNON.id)
+      }
+    }
+
+    // Rocket salvo: RMB starts it, the pods take turns until it's spent, then they reload
+    if (this.mouse.aiming && salvo.left > 0 && now >= salvo.next) {
+      const pod = rig.pod((MECH_SALVO - salvo.left) % 2, new THREE.Vector3())
+      const spread = this.mechAim.distance * 0.025
+      const to = aim.clone().add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread * 0.5, (Math.random() - 0.5) * spread))
+      const ground = heightAt(to.x, to.z)
+      if (to.y < ground) to.y = ground
+      this.match.net.sendFire('rocket', [pod.x, pod.y, pod.z], [to.x, to.y, to.z])
+      this.projectiles.missile(pod, () => to, () => this.explodeAt(to, 'rocket'), false)
+      this.projectiles.muzzleFlash(pod, to.clone().sub(pod).normalize(), 2.2)
+      this.audio.shot('launch', pod)
+      salvo.left--
+      salvo.next = now + MECH_ROCKET_GAP * 1000
+      if (salvo.left === 0) salvo.reloadUntil = now + MECH_SALVO_RELOAD * 1000
+    }
+  }
+
+  /**
+   * The tank's turret swings round (slowly — it's heavy) to put the gun on whatever the crosshair is on; the
+   * HUD shows where the gun really points. LMB fires a shell down the barrel: it flies at 260 m/s and blows
+   * up where it lands (the server does the damage), with a kick that rocks the view.
+   */
+  private updateTankGun(tank: Vehicle, dt: number) {
+    const origin = this.camera.getWorldPosition(new THREE.Vector3())
+    const view = this.camera.getWorldDirection(new THREE.Vector3())
+    const targets = this.shootTargets()
+    // What the crosshair is on (the long rays through the terrain are costly: a dozen times a second is plenty)
+    const now = performance.now()
+    const fire = this.mouse.shooting && this.cannonCooldown - dt <= 0
+    if (fire || now - this.tankAim.at > 70) {
+      const sight = new THREE.Raycaster(origin, view, 3, SHELL_RANGE).intersectObjects(targets, true)[0]
+      this.tankAim.distance = sight?.distance ?? SHELL_RANGE
+      this.tankAim.at = now
+    }
+    const aim = origin.clone().addScaledVector(view, this.tankAim.distance)
+    tank.object.updateMatrixWorld()
+    // Relative to the turret's turning axis; the trunnions sit (TANK_GUN_PIVOT.z - axis) ahead of it
+    const local = tank.object.worldToLocal(aim.clone()).sub(TANK_TURRET_PIVOT)
+    const wantYaw = Math.atan2(local.x, local.z)
+    const flat = Math.max(1, Math.hypot(local.x, local.z) - (TANK_GUN_PIVOT.z - TANK_TURRET_PIVOT.z))
+    const wantPitch = THREE.MathUtils.clamp(Math.atan2(local.y - TANK_GUN_PIVOT.y, flat), -TANK_GUN_PITCH.down, TANK_GUN_PITCH.up)
+    const yawStep = TANK_TURRET_SPEED * dt, pitchStep = TANK_PITCH_SPEED * dt
+    tank.aimYaw = wrap(tank.aimYaw + THREE.MathUtils.clamp(wrap(wantYaw - tank.aimYaw), -yawStep, yawStep))
+    tank.aimPitch += THREE.MathUtils.clamp(wantPitch - tank.aimPitch, -pitchStep, pitchStep)
+
+    // Where the barrel points now: the HUD marks it
+    const muzzle = new THREE.Vector3(), dir = new THREE.Vector3()
+    this.fleet.gunRay(tank, muzzle, dir)
+    if (fire || now - this.tankAim.gunAt > 70) {
+      const hit = new THREE.Raycaster(muzzle, dir, 0.5, SHELL_RANGE).intersectObjects(targets, true)[0]
+      this.tankAim.gunDistance = hit?.distance ?? SHELL_RANGE
+      this.tankAim.gunAt = now
+    }
+    const lands = muzzle.clone().addScaledVector(dir, this.tankAim.gunDistance)
+    const screen = lands.clone().project(this.camera)
+    const onScreen = screen.z < 1 && Math.abs(screen.x) < 1 && Math.abs(screen.y) < 1
+    this.cannonCooldown = Math.max(0, this.cannonCooldown - dt)
+    setGameState({
+      gunX: onScreen ? Math.round(((screen.x + 1) / 2) * 400) / 400 : -1,
+      gunY: onScreen ? Math.round(((1 - screen.y) / 2) * 400) / 400 : -1,
+      cannon: Math.round((1 - this.cannonCooldown / TANK_RELOAD) * 50) / 50,
+      tankSight: this.cameraMode === 'inside',
+    })
+    if (!this.mouse.shooting || this.cannonCooldown > 0) return
+    this.cannonCooldown = TANK_RELOAD
+    this.match.net.sendFire('shell', [muzzle.x, muzzle.y, muzzle.z], [lands.x, lands.y, lands.z])
+    this.projectiles.shell(muzzle, lands, () => this.explodeAt(lands, 'shell'))
+    this.projectiles.muzzleFlash(muzzle, dir, 3.5)
+    this.projectiles.blastDust(new THREE.Vector3(muzzle.x, heightAt(muzzle.x, muzzle.z), muzzle.z), 3)
+    this.audio.shot('cannon', null)
+    tank.gunRecoil = 1
+    this.shake = Math.min(1.4, this.shake + 0.55)
+    this.player.pitch += 0.03
+  }
+
+  /** Would a car's or tank's footprint (two circles along its length) at (x, z, yaw) hit something? */
   private carBlocked(car: Vehicle, x: number, z: number, yaw: number, moving = true) {
     if (Math.abs(x) > WORLD_LIMIT || Math.abs(z) > WORLD_LIMIT) return true
-    const fx = Math.sin(yaw) * CAR_CIRCLE_OFFSET
-    const fz = Math.cos(yaw) * CAR_CIRCLE_OFFSET
+    const tank = car.kind === 'tank', mech = car.kind === 'mech'
+    const offset = mech ? 0 : tank ? TANK_CIRCLE_OFFSET : CAR_CIRCLE_OFFSET
+    const fx = Math.sin(yaw) * offset
+    const fz = Math.cos(yaw) * offset
     const feet = [{ x: x + fx, z: z + fz }, { x: x - fx, z: z - fz }]
     // Deep water ahead
-    if (heightAt(x + Math.sin(yaw) * 3.2, z + Math.cos(yaw) * 3.2) < CAR_WATER_LIMIT) return true
-    const others: Array<{ x: number; z: number; r: number }> = moving ? this.fleet.circles(car) : []
+    if (heightAt(x + Math.sin(yaw) * (tank ? 3.8 : 3.2), z + Math.cos(yaw) * (tank ? 3.8 : 3.2)) < CAR_WATER_LIMIT) return true
+    const others: Array<{ x: number; z: number; r: number }> = moving ? [...this.fleet.circles(car), ...this.outposts.barrelCircles()] : []
     if (moving) for (const remote of this.remotes.values()) {
       const avatar = remote.avatar?.group
       if (avatar?.visible && !remote.info.dead) others.push({ x: avatar.position.x, z: avatar.position.z, r: 0.45 })
     }
-    const r = CAR_CIRCLE_RADIUS
+    const r = mech ? MECH_RADIUS : tank ? TANK_CIRCLE_RADIUS : CAR_CIRCLE_RADIUS
     for (const f of feet) {
       for (const c of this.solidCircles) {
         const dx = f.x - c.x, dz = f.z - c.z, min = c.r + r
@@ -1388,17 +2111,19 @@ export class BattlefieldGame {
     return false
   }
 
-  /** Sit the car on the ground: height from its wheels, pitch and roll from the slope under them. */
+  /** Sit a car (on its wheels) or a tank (on its tracks) on the ground: height, pitch and roll from the slope under it. */
   private carGroundPose(car: Vehicle) {
     const { x, z } = car.object.position
     const yaw = car.object.rotation.y
     const cos = Math.cos(yaw), sin = Math.sin(yaw)
-    const f = CAR_WHEELBASE / 2, t = CAR_TRACK / 2
+    const length = car.kind === 'tank' ? TANK_LENGTH * 0.8 : CAR_WHEELBASE
+    const width = car.kind === 'tank' ? TANK_WIDTH * 0.75 : CAR_TRACK
+    const f = length / 2, t = width / 2
     const at = (lx: number, lz: number) => heightAt(x + lx * cos + lz * sin, z - lx * sin + lz * cos)
     const fl = at(t, f), fr = at(-t, f), rl = at(t, -f), rr = at(-t, -f)
     car.object.position.y = Math.max((fl + fr + rl + rr) / 4, heightAt(x, z) - 0.15)
-    car.object.rotation.x = Math.atan2((rl + rr - fl - fr) / 2, CAR_WHEELBASE)
-    car.object.rotation.z = Math.atan2((fl + rl - fr - rr) / 2, CAR_TRACK)
+    car.object.rotation.x = Math.atan2((rl + rr - fl - fr) / 2, length)
+    car.object.rotation.z = Math.atan2((fl + rl - fr - rr) / 2, width)
   }
 
   /** Vehicles nobody drives: helicopters sink to the ground (a wreck falls hard) and level out, cars sit on the ground. */
@@ -1406,8 +2131,16 @@ export class BattlefieldGame {
     for (const vehicle of this.fleet.vehicles) {
       if (driverOf(vehicle) || (vehicle === this.vehicle && this.seat === 0)) continue
       const pose = vehicle.object
-      if (vehicle.kind === 'car') {
-        // A car rolls to a stop where it was left
+      if (vehicle.kind === 'mech') {
+        // An empty mech stands upright where it was left (dropping to the ground if it was left in the air)
+        vehicle.spin = 0
+        pose.position.y = Math.max(heightAt(pose.position.x, pose.position.z), pose.position.y - 14 * dt)
+        pose.rotation.x = pose.rotation.z = 0
+        continue
+      }
+      if (vehicle.kind !== 'heli') {
+        // A car rolls to a stop where it was left (a tank's tracks hold it)
+        if (vehicle.kind === 'tank') vehicle.spin = 0
         if (Math.abs(vehicle.spin) > 0.05) {
           const step = vehicle.spin * dt
           const x = pose.position.x + Math.sin(pose.rotation.y) * step
@@ -1490,6 +2223,7 @@ export class BattlefieldGame {
     const end = hits[0]?.point.clone() ?? origin.clone().addScaledVector(dir, MACHINE_GUN.range)
     this.projectiles.round('bullet_heavy', muzzle, end, MACHINE_GUN.color)
     this.projectiles.muzzleFlash(muzzle, dir, 1.8)
+    this.audio.shot('mg', null)
     this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -1.6), dir)
     turret.recoil = 1
     this.match.net.sendShot([end.x, end.y, end.z], MACHINE_GUN.id)
@@ -1507,6 +2241,43 @@ export class BattlefieldGame {
     const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize()
     const velocity = right.multiplyScalar(2 + Math.random()).add(new THREE.Vector3(0, 2 + Math.random() * 1.2, 0)).addScaledVector(dir, -0.6)
     this.projectiles.casing(kind, at, velocity)
+  }
+
+  /**
+   * The helicopter's gunner: the nose gun swings round to whatever the crosshair is on (within its arc under the
+   * nose) and fires while the left button is held.
+   */
+  private updateHeliGun(heli: Vehicle, dt: number) {
+    const origin = this.camera.getWorldPosition(new THREE.Vector3())
+    const view = this.camera.getWorldDirection(new THREE.Vector3())
+    const targets = this.shootTargets()
+    const sight = new THREE.Raycaster(origin, view, 2, HELI_GUN.range).intersectObjects(targets, true)[0]
+    const aim = sight?.point ?? origin.clone().addScaledVector(view, HELI_GUN.range)
+    heli.object.updateMatrixWorld()
+    const local = heli.object.worldToLocal(aim.clone()).sub(HELI_GUN_PIVOT)
+    const wantYaw = THREE.MathUtils.clamp(Math.atan2(local.x, local.z), -HELI_GUN_LIMITS.yaw, HELI_GUN_LIMITS.yaw)
+    const wantPitch = THREE.MathUtils.clamp(Math.atan2(local.y, Math.hypot(local.x, local.z)), -HELI_GUN_LIMITS.down, HELI_GUN_LIMITS.up)
+    const turn = 3.2 * dt
+    heli.aimYaw += THREE.MathUtils.clamp(wrap(wantYaw - heli.aimYaw), -turn, turn)
+    heli.aimPitch += THREE.MathUtils.clamp(wantPitch - heli.aimPitch, -turn, turn)
+    this.carGunCooldown = Math.max(0, this.carGunCooldown - dt)
+    if (!this.mouse.shooting || this.carGunCooldown > 0) return
+    this.carGunCooldown = HELI_GUN.fireRate
+    const muzzle = this.fleet.carMuzzle(heli, new THREE.Vector3())
+    const dir = aim.clone().sub(muzzle).normalize()
+    dir.add(new THREE.Vector3((Math.random() - 0.5) * HELI_GUN.spread, (Math.random() - 0.5) * HELI_GUN.spread, (Math.random() - 0.5) * HELI_GUN.spread)).normalize()
+    const hits = new THREE.Raycaster(muzzle.clone().addScaledVector(dir, 0.3), dir, 0, HELI_GUN.range).intersectObjects(targets, true)
+    const end = hits[0]?.point.clone() ?? muzzle.clone().addScaledVector(dir, HELI_GUN.range)
+    this.projectiles.round('bullet_heavy', muzzle, end, HELI_GUN.color)
+    this.projectiles.muzzleFlash(muzzle, dir, 1.2)
+    this.audio.shot('gatling', null)
+    this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -0.8), dir)
+    heli.gunRecoil = 1
+    this.match.net.sendShot([end.x, end.y, end.z], HELI_GUN.id)
+    if (hits[0]) {
+      this.applyImpact(hits[0], dir, true)
+      this.reportHit(hits[0].object, HELI_GUN.id)
+    }
   }
 
   /**
@@ -1539,6 +2310,7 @@ export class BattlefieldGame {
     const end = hits[0]?.point.clone() ?? muzzle.clone().addScaledVector(dir, CAR_GUN.range)
     this.projectiles.round('bullet_heavy', muzzle, end, CAR_GUN.color)
     this.projectiles.muzzleFlash(muzzle, dir, 1.3)
+    this.audio.shot('gatling', null)
     this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -1.2), dir)
     car.gunRecoil = 1
     this.match.net.sendShot([end.x, end.y, end.z], CAR_GUN.id)
@@ -1548,10 +2320,11 @@ export class BattlefieldGame {
     }
   }
 
-  /** Right mouse: aim down the sights (a little zoom), or look through a sniper's scope. */
+  /** Right mouse: aim down the sights (a little zoom), or look through a sniper's scope; a tank's gunner sight magnifies too. */
   private updateZoom(dt: number, canShoot: boolean) {
     const def = this.arsenal.def
-    const want = canShoot && this.mouse.aiming && def && !this.arsenal.reloading ? def.zoom : 1
+    const sight = this.vehicle?.kind === 'tank' && this.seat === 0 && this.cameraMode === 'inside' && !this.transition
+    const want = sight ? TANK_SIGHT_ZOOM : canShoot && this.mouse.aiming && def && !this.arsenal.reloading ? def.zoom : 1
     const next = THREE.MathUtils.lerp(this.zoom, want, Math.min(1, dt * 12))
     this.zoom = Math.abs(next - want) < 0.01 ? want : next
     const fov = 75 / this.zoom
@@ -1568,7 +2341,7 @@ export class BattlefieldGame {
 
   /** Where a missile aims on a helicopter (its cabin). */
   private aimPoint(vehicle: Vehicle) {
-    return vehicle.object.localToWorld(new THREE.Vector3(0, 1.6, 0.5))
+    return vehicle.object.localToWorld(new THREE.Vector3(0, 1.7, 0.9))
   }
 
   /** A helicopter with an enemy aboard (anyone may fly anyone's helicopter, so it's about who is inside). */
@@ -1577,14 +2350,16 @@ export class BattlefieldGame {
   }
 
   /**
-   * Holding the launcher on foot: keep an enemy aircraft in the sights for LOCK_TIME to lock on, then fire.
-   * Returns true when the launcher is in hand (so the normal guns don't fire).
+   * Holding the launcher on foot: keep an enemy aircraft in the sights for LOCK_TIME to lock on and the missile
+   * homes on it; fire without a lock and it's an unguided rocket that flies straight (good against cars, tanks
+   * and people). Returns true when the launcher is in hand (so the normal guns don't fire).
    */
   private updateLauncher(dt: number, canShoot: boolean): boolean {
     const holding = canShoot && this.arsenal.current === 'launcher' && !this.vehicle
     if (!holding) {
       if (gameState.lock !== -1) setGameState({ lock: -1, lockX: -1, lockY: -1 })
       this.lock = { target: null, time: 0 }
+      this.audio.lockTone(-1, 0)
       return this.arsenal.current === 'launcher'
     }
     const origin = this.camera.getWorldPosition(new THREE.Vector3())
@@ -1615,26 +2390,59 @@ export class BattlefieldGame {
       y = (1 - screen.y) / 2
     }
     setGameState({ lock: progress, lockX: Math.round(x * 400) / 400, lockY: Math.round(y * 400) / 400 })
+    this.audio.lockTone(best ? progress : -1, performance.now() / 1000)
 
     const locked = best && progress >= 1
-    if (!locked) {
-      if (this.mouse.shooting && this.arsenal.mag > 0 && !gameState.message.startsWith('Hold the launcher')) {
-        setGameState({ message: `Hold the launcher on an enemy aircraft for ${LOCK_TIME} s to lock on.` })
-      }
-      this.arsenal.holdTrigger(this.mouse.shooting)
-      return true
-    }
     if (this.arsenal.mag <= 0 && this.mouse.shooting) {
-      if (this.arsenal.reserve.missile <= 0) setGameState({ message: 'No missiles: take some from the missile crates in a base.' })
-      else this.arsenal.reload()
+      if (this.arsenal.reserve.missile <= 0) {
+        if (!gameState.message.startsWith('No missiles')) setGameState({ message: 'No missiles: take some from the missile crates in a base.' })
+      } else this.arsenal.reload()
     }
     if (!this.arsenal.fireMissile(this.mouse.shooting)) return true
-    const target = best!
-    this.match.net.sendMissile(target.id)
-    this.projectiles.missile(origin.clone().addScaledVector(forward, 1.5), () => (target.destroyed ? null : this.aimPoint(target)))
-    setGameState({ message: 'Missile away!' })
+    const from = origin.clone().addScaledVector(forward, 1.5)
+    this.audio.shot('launch', null)
     this.lock = { target: null, time: 0 }
+    if (locked) {
+      const target = best!
+      this.match.net.sendMissile(target.id)
+      this.projectiles.missile(from, () => (target.destroyed ? null : this.aimPoint(target)))
+      setGameState({ message: 'Missile away — it\'s homing on them!' })
+      return true
+    }
+    // No lock: an unguided rocket, straight where we aim
+    const hit = new THREE.Raycaster(from, forward, 0, ROCKET_RANGE).intersectObjects(this.shootTargets(), true)[0]
+    const to = hit?.point ?? from.clone().addScaledVector(forward, ROCKET_RANGE)
+    this.match.net.sendFire('rocket', [from.x, from.y, from.z], [to.x, to.y, to.z])
+    this.projectiles.missile(from, () => to, () => this.explodeAt(to, 'rocket'), false)
+    setGameState({ message: 'Rocket away! (Hold on an enemy aircraft for 2 s first for a homing missile.)' })
     return true
+  }
+
+  // ---------------------------------------------------------------- grenades
+
+  /** [Q]: pull the pin and throw a grenade where we look (a little upwards); it goes off 2.8 s later. */
+  private throwGrenade() {
+    if (!this.onFoot || this.grenadeCooldown > 0) return
+    if (this.arsenal.reserve.grenade <= 0) {
+      setGameState({ message: 'No grenades — the grenade boxes next to your base\'s gun table have more.' })
+      return
+    }
+    if (this.grenades.live(this.match.you) >= MAX_LIVE_GRENADES) return
+    this.arsenal.reserve.grenade--
+    this.grenadeCooldown = GRENADE_COOLDOWN
+    this.throwTimer = THROW_TIME
+    const dir = this.camera.getWorldDirection(new THREE.Vector3())
+    const right = new THREE.Vector3(-dir.z, 0, dir.x).normalize()
+    const from = this.camera.getWorldPosition(new THREE.Vector3()).addScaledVector(dir, 0.5).addScaledVector(right, 0.25).add(new THREE.Vector3(0, -0.1, 0))
+    const velocity = dir.clone().add(new THREE.Vector3(0, 0.22, 0)).normalize().multiplyScalar(THROW_SPEED)
+    velocity.x += this.player.velocity.x * 0.6
+    velocity.z += this.player.velocity.z * 0.6
+    this.grenades.throw(this.match.you, from, velocity, GRENADE_FUSE, (at) => {
+      this.match.net.sendBlast([at.x, at.y, at.z])
+      this.explodeAt(at, 'grenade')
+    })
+    this.match.net.sendThrow([from.x, from.y, from.z], [velocity.x, velocity.y, velocity.z])
+    this.audio.ui('pin')
   }
 
   // ---------------------------------------------------------------- gem
@@ -1681,8 +2489,10 @@ export class BattlefieldGame {
     const def = WEAPONS[shot.kind]
     const gun = this.viewmodel.fired()
     const start = gun?.muzzle ?? shot.start
+    this.flashLight(start, def.round === 'bolt' ? 0x7dff90 : 0xffc070, def.power >= 40 ? 60 : 30, 0.07)
     if (def.round) this.projectiles.round(def.round, start, shot.end, def.color)
     if (gun && def.round && def.round !== 'bolt') this.ejectCasing(def.round, gun.eject, shot.dir)
+    this.audio.shot(SHOT_SOUND[shot.kind] ?? 'rifle', null)
     this.match.net.sendShot([shot.end.x, shot.end.y, shot.end.z], shot.kind)
     if (shot.hit) this.applyImpact(shot.hit, shot.dir, def.power >= 40 || def.round === 'bullet_heavy')
     if (shot.object) this.reportHit(shot.object, shot.kind)
@@ -1696,9 +2506,12 @@ export class BattlefieldGame {
       this.lastWeaponsKey = key
       setGameState({ weapons })
     }
+    const vehicle = this.vehicle
     setGameState({
       current: this.arsenal.kind,
-      carGun: this.vehicle?.kind === 'car' && this.seat === 0,
+      carGun: (vehicle?.kind === 'car' && this.seat === 0) || (vehicle?.kind === 'heli' && this.seat === 1),
+      grenades: this.arsenal.reserve.grenade ?? 0,
+      vehicleHp: vehicle ? Math.round((vehicle.hp / VEHICLE_MAX_HP[vehicle.kind]) * 100) / 100 : 1,
       weaponName: def?.name ?? '',
       ammo: this.arsenal.mag,
       maxAmmo: def?.magSize ?? 0,
@@ -1723,9 +2536,12 @@ export class BattlefieldGame {
 
       this.updateRemotes(realDt)
       this.updateShadowArea()
+      this.water.update(time)
+      this.updateFlashes()
       this.bases.blue.gem.update(time)
       this.bases.red.gem.update(time)
-      this.grass.update(this.camera.position)
+      this.grass?.update(this.camera.position)
+      this.blades?.update(this.camera.position, time)
       this.rocks.update(this.camera.position)
       this.forest.update(this.camera.position)
       this.items.update(this.camera.position)
@@ -1743,7 +2559,9 @@ export class BattlefieldGame {
         this.fleet.update(realDt, this.camera.position, this.vehicle)
         this.turrets.update(time, this.camera.position)
         this.projectiles.update(realDt)
-        this.renderer.render(this.scene, this.camera)
+        this.grenades.update(realDt)
+        this.audio.lockTone(-1, 0)
+        this.graphics.render(realDt)
         return
       }
 
@@ -1764,9 +2582,16 @@ export class BattlefieldGame {
       }
 
       this.arsenal.tick(dt)
-      // Hand weapons: on foot and in a helicopter's passenger seats. Pilots can't shoot; car drivers use the roof gatling.
-      const canShoot = !this.dead && !this.transition && !this.turret && (!this.vehicle || (this.vehicle.kind === 'heli' && this.seat !== 0))
-      if (this.vehicle?.kind === 'car' && this.seat === 0 && !this.transition && !this.dead) this.updateCarGun(this.vehicle, dt)
+      this.grenadeCooldown = Math.max(0, this.grenadeCooldown - dt)
+      this.throwTimer = Math.max(0, this.throwTimer - dt)
+      // Hand weapons: on foot and in a helicopter's passenger seats. Pilots can't shoot; car drivers use the
+      // roof gatling, tank drivers the cannon.
+      const canShoot = !this.dead && !this.transition && !this.turret && this.throwTimer <= 0 && (!this.vehicle || (this.vehicle.kind === 'heli' && this.seat >= 2))
+      const driving = this.vehicle && this.seat === 0 && !this.transition && !this.dead ? this.vehicle : null
+      if (driving?.kind === 'car') this.updateCarGun(driving, dt)
+      if (driving?.kind === 'tank') this.updateTankGun(driving, dt)
+      if (driving?.kind === 'mech') this.updateMechGun(driving, dt)
+      if (this.vehicle?.kind === 'heli' && this.seat === 1 && !this.transition && !this.dead) this.updateHeliGun(this.vehicle, dt)
       const scoped = this.updateZoom(realDt, canShoot)
       const launcherInHand = this.updateLauncher(realDt, canShoot)
       if (canShoot && !launcherInHand) {
@@ -1776,7 +2601,9 @@ export class BattlefieldGame {
         this.arsenal.holdTrigger(this.mouse.shooting)
       }
       this.projectiles.update(realDt)
+      this.grenades.update(realDt)
       this.decals.update()
+      this.updateSmoke(realDt)
       this.viewmodel.show(this.arsenal.kind)
       this.viewmodel.update(dt, {
         recoilKick: this.arsenal.shotCount !== this.lastShotCount,
@@ -1788,17 +2615,142 @@ export class BattlefieldGame {
       })
       this.lastShotCount = this.arsenal.shotCount
       this.syncHudState()
+      this.pruneKillFeed()
+      this.weaponSounds(canShoot)
+      if (now - this.lastRadarAt >= 120) {
+        this.lastRadarAt = now
+        this.updateRadar()
+      }
+      if (now - this.lastShadeAt >= 250) {
+        this.lastShadeAt = now
+        this.graphics.viewmodelSun = this.inSunlight() ? 1 : 0.3
+      }
+      this.audio.setListener(this.camera)
+      if (now - this.lastLoopsAt >= 100) {
+        this.lastLoopsAt = now
+        this.audio.updateLoops(this.loopSources())
+      }
 
-      this.renderer.render(this.scene, this.camera)
+      this.render(realDt)
     }
     requestAnimationFrame(loop)
   }
 
+  /** Draw the frame, shaken by nearby blasts (the shake only lasts for this frame's picture). */
+  private render(dt: number) {
+    if (this.shake < 0.01) {
+      this.shake = 0
+      this.graphics.render(dt)
+      return
+    }
+    const saved = this.camera.quaternion.clone()
+    const k = this.shake * this.shake * 0.05
+    this.camera.rotateX((Math.random() - 0.5) * k)
+    this.camera.rotateY((Math.random() - 0.5) * k)
+    this.camera.rotateZ((Math.random() - 0.5) * k * 0.6)
+    this.graphics.render(dt)
+    this.camera.quaternion.copy(saved)
+    this.shake = Math.max(0, this.shake - dt * 1.8)
+  }
+
+  /** Reloading, switching weapons and pulling the trigger on an empty gun all make their little noise. */
+  private weaponSounds(canShoot: boolean) {
+    const st = this.soundState
+    const reloading = this.arsenal.reloading
+    if (reloading && !st.reloading) this.audio.ui('reload')
+    if (!reloading && st.reloading && this.arsenal.mag > st.mag) this.audio.ui('reloaded')
+    if (this.arsenal.kind !== st.kind && st.kind !== null && this.arsenal.kind !== null) this.audio.ui('switch')
+    const pulled = this.mouse.shooting && !st.trigger
+    if (pulled && canShoot && !reloading && this.arsenal.mag === 0 && this.arsenal.def && this.arsenal.def.slot !== 'launcher') this.audio.ui('empty')
+    st.reloading = reloading
+    if (!reloading) st.mag = this.arsenal.mag
+    st.kind = this.arsenal.kind
+    st.trigger = this.mouse.shooting
+  }
+
+  /** Badly damaged vehicles trail smoke. */
+  private updateSmoke(dt: number) {
+    this.smokeTimer -= dt
+    if (this.smokeTimer > 0) return
+    this.smokeTimer = 0.12
+    for (const vehicle of this.fleet.vehicles) {
+      const health = vehicle.hp / VEHICLE_MAX_HP[vehicle.kind]
+      if (vehicle.destroyed || health > 0.4 || vehicle.object.position.distanceToSquared(this.camera.position) > 300 ** 2) continue
+      const at = vehicle.object.localToWorld(new THREE.Vector3(0, vehicle.kind === 'heli' ? 2.6 : 2, vehicle.kind === 'heli' ? -1 : -1.5))
+      this.projectiles.smoke(at, health < 0.2 ? 1.4 : 0.8)
+    }
+  }
+
+  /** Every running vehicle near us for the sound of rotors and engines. */
+  private loopSources(): LoopSource[] {
+    const sources: LoopSource[] = []
+    for (const v of this.fleet.vehicles) {
+      if (v.destroyed) continue
+      const own = v === this.vehicle
+      if (v.kind === 'heli') {
+        if (v.spin > 2) sources.push({ id: v.id, kind: 'rotor', position: v.object.position.clone().add(new THREE.Vector3(0, 3, 0)), rate: v.spin / MAX_ROTOR_RPM, own })
+        continue
+      }
+      if (!own && !driverOf(v)) continue
+      const heavy = v.kind === 'tank' || v.kind === 'mech'
+      sources.push({ id: v.id, kind: heavy ? 'tank' : 'car', position: v.object.position.clone().add(new THREE.Vector3(0, v.kind === 'mech' ? 5 : 1, 0)), rate: Math.min(1, Math.abs(v.spin) / (v.kind === 'tank' ? TANK_MAX_SPEED : v.kind === 'mech' ? MECH_RUN : CAR_MAX_SPEED)), own })
+    }
+    return sources
+  }
+
+  /**
+   * The radar's picture: teammates, vehicles (enemy-crewed ones only when close, flying or firing), the gems,
+   * barrels near us, and enemies on foot who gave themselves away (fired, came close, or carry our gem).
+   */
+  private updateRadar() {
+    const now = performance.now()
+    const me = this.camera.position
+    const view = this.camera.getWorldDirection(new THREE.Vector3())
+    radar.x = me.x
+    radar.z = me.z
+    radar.yaw = Math.atan2(-view.x, -view.z)
+    radar.range = this.vehicle?.kind === 'heli' ? 320 : 180
+    const blips: RadarBlip[] = []
+    const recently = (id: string | null) => !!id && now - (this.remotes.get(id)?.lastFiredAt ?? 0) < 3000
+    for (const team of ['blue', 'red'] as const) {
+      if (this.gemCarried(team)) continue
+      const gem = this.bases[team].group.localToWorld(GEM_LOCAL.clone())
+      blips.push({ x: gem.x, z: gem.z, kind: 'gem', team, yaw: 0 })
+    }
+    for (const barrel of BARREL_SPOTS) {
+      if (this.outposts.alive(barrel.id) && Math.hypot(barrel.x - me.x, barrel.z - me.z) < 150) blips.push({ x: barrel.x, z: barrel.z, kind: 'barrel', team: null, yaw: 0 })
+    }
+    for (const v of this.fleet.vehicles) {
+      if (v.destroyed || v === this.vehicle) continue
+      const crew = v.occupants.filter((id): id is string => !!id)
+      const friendly = crew.some((id) => this.teamOf(id) === this.team)
+      const p = v.object.position
+      if (crew.length && !friendly) {
+        const flying = v.kind === 'heli' && p.y - this.fleet.restHeight(v, p.x, p.z) > 3
+        if (!flying && Math.hypot(p.x - me.x, p.z - me.z) > 70 && !crew.some(recently)) continue
+      }
+      blips.push({ x: p.x, z: p.z, kind: v.kind, team: crew.length ? (friendly ? this.team : other(this.team)) : null, yaw: v.object.rotation.y, empty: !crew.length })
+    }
+    for (const remote of this.remotes.values()) {
+      const s = remote.target
+      if (!remote.info.online || remote.info.dead || !s || s.vehicle || !remote.avatar) continue
+      const mate = remote.info.team === this.team
+      const a = remote.avatar.group.position
+      if (!mate && Math.hypot(a.x - me.x, a.z - me.z) > 35 && !recently(remote.info.id) && !s.flag) continue
+      blips.push({ x: a.x, z: a.z, kind: mate ? 'mate' : 'enemy', team: remote.info.team, yaw: s.yaw + Math.PI, gem: s.flag })
+    }
+    radar.blips = blips
+    radar.version++
+  }
+
   dispose() {
     this.disposed = true
+    this.audio.dispose()
     for (const [t, k, fn] of this.boundHandlers) t.removeEventListener(k, fn)
     this.boundHandlers = []
     for (const remote of this.remotes.values()) remote.avatar?.dispose()
+    this.graphics.dispose()
+    this.sky.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }
