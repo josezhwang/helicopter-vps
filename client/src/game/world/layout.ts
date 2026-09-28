@@ -88,6 +88,18 @@ export const DECK_GUNS: Record<Team, { spots: Array<[number, number]>; facing: n
   blue: { spots: [[-314, -396], [-284, -396], [-254, -396]], facing: Math.PI },
   red: { spots: [[314, 396], [284, 396], [254, 396]], facing: 0 },
 }
+/** A ship's hull strength; the command bridge console in its hangar; its main cannon on top of the hull (world). */
+export const SHIP_MAX_HP = 6000
+export const SHIP_BRIDGE: Record<Team, { x: number; z: number }> = { blue: { x: -361, z: -381 }, red: { x: 361, z: 381 } }
+export const SHIP_CANNON: Record<Team, { x: number; y: number; z: number }> = { blue: { x: -244, y: 754, z: -304 }, red: { x: 244, y: 754, z: 304 } }
+/** The hull as a world box (for rounds and blasts; the server keeps the same). */
+export const SHIP_HULL: Record<Team, { min: [number, number, number]; max: [number, number, number] }> = {
+  blue: { min: [-454, 650, -371], max: [-154, 750, -237] },
+  red: { min: [154, 650, 237], max: [454, 750, 371] },
+}
+/** The bridge console counts as a gun position after the base and deck guns. */
+export const bridgeId = (team: Team) => `${team}-mg-${LAYOUT.machineGuns.length + DECK_GUNS[team].spots.length}`
+
 /** Teleport pads: one on the ground by each base's fighter pads, one inside its ship's hangar bay; each sends you to the other. */
 export const TELEPORTS: Record<Team, { ground: { x: number; z: number }; deck: { x: number; z: number } }> = {
   blue: { ground: baseToWorld('blue', -74, 6), deck: { x: -354, z: -388 } },

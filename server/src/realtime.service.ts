@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { AuthService } from './auth.service'
 import { DISCORD_COLOR, DiscordService, plain } from './discord.service'
 import { RoomService, Team } from './room.service'
-import { AMMO, AMMO_TYPES, BARRELS, GEM_PEDESTAL, MACHINE_GUN_SPOTS, VEHICLE_HOMES, VEHICLE_MAX_HP, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type VehicleKindId, type WeaponKind } from './game-layout'
+import { AMMO, AMMO_TYPES, BARRELS, GEM_PEDESTAL, MACHINE_GUN_SPOTS, SHIP_ABOARD, SHIP_CANNON, SHIP_HULL, SHIP_MAX_HP, bridgeId, VEHICLE_HOMES, VEHICLE_MAX_HP, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type VehicleKindId, type WeaponKind } from './game-layout'
 
 type Vec3 = [number, number, number]
 
@@ -80,21 +80,31 @@ interface RoomWorld {
   /** Grenades in the air per thrower (where from, until when they may still go off). */
   grenades: Map<string, Array<{ from: Vec3; until: number }>>
   timers: Set<NodeJS.Timeout>
+  /** The capital ships' hulls: strength left, and whether it's a burning wreck waiting for repair. */
+  ships: Record<Team, { hp: number; wrecked: boolean }>
 }
 
-type BlastKind = 'shell' | 'rocket' | 'grenade' | 'barrel'
+type BlastKind = 'shell' | 'rocket' | 'grenade' | 'barrel' | 'pulse' | 'cannon'
 /**
  * What explosions do: radius (m), damage to a player at the centre, damage to a vehicle at the centre (armoured
  * tanks take `tank` times that). Falls off towards the edge.
  */
-const BLASTS: Record<BlastKind, { radius: number; player: number; vehicle: number; tank: number }> = {
-  shell: { radius: 7, player: 240, vehicle: 520, tank: 0.8 },
-  rocket: { radius: 6, player: 220, vehicle: 700, tank: 1 },
-  grenade: { radius: 7, player: 150, vehicle: 170, tank: 0.35 },
-  barrel: { radius: 8, player: 150, vehicle: 260, tank: 0.5 },
+const BLASTS: Record<BlastKind, { radius: number; player: number; vehicle: number; tank: number; ship: number }> = {
+  shell: { radius: 7, player: 240, vehicle: 520, tank: 0.8, ship: 300 },
+  rocket: { radius: 6, player: 220, vehicle: 700, tank: 1, ship: 350 },
+  grenade: { radius: 7, player: 150, vehicle: 170, tank: 0.35, ship: 40 },
+  barrel: { radius: 8, player: 150, vehicle: 260, tank: 0.5, ship: 0 },
+  // The AA / deck guns' plasma bolts (made for aircraft and armour), and a capital ship's main cannon
+  pulse: { radius: 4.5, player: 70, vehicle: 230, tank: 1, ship: 90 },
+  cannon: { radius: 11, player: 260, vehicle: 900, tank: 1, ship: 700 },
 }
 /** Projectile speeds (m/s) for shells and rockets: the blast comes when it arrives. */
-const PROJECTILE_SPEED = { shell: 260, rocket: 120 }
+const PROJECTILE_SPEED = { shell: 260, rocket: 120, pulse: 150, cannon: 170 }
+/** Pulse cannons (the AA and deck guns) and a capital ship's main cannon: how often they may fire. */
+const PULSE_INTERVAL_MS = 520
+const CANNON_INTERVAL_MS = 2200
+/** A wrecked capital ship is repaired this long after it goes down. */
+const SHIP_WRECK_MS = 60_000
 const TANK_RELOAD_MS = 3000
 const ROCKET_INTERVAL_MS = 1200
 /** A mech fires its rockets in salvos of up to MECH_SALVO, then reloads. */
@@ -116,7 +126,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const VEHICLE_ID = /^(blue|red)-(heli|car|tank|mech|fighter)-[0-4]$/
 /** Aircraft: what anti-aircraft and fighter missiles lock on to. */
 const HELI_ID = /^(blue|red)-(heli|fighter)-[0-4]$/
-const GUN_ID = /^(blue|red)-mg-[0-7]$/
+const GUN_ID = /^(blue|red)-mg-[0-8]$/
 const SEATS = { heli: 4, car: 1, tank: 1, mech: 1, fighter: 1 }
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
@@ -169,6 +179,15 @@ const dist2 = (a: [number, number] | Vec3, b: [number, number] | Vec3) => {
 
 /** Highest anything may be: fighters climb into the space zone. */
 const CEILING = 1100
+
+/** How far a point is from a box (0 inside). */
+function boxDistance(box: { min: [number, number, number]; max: [number, number, number] }, p: Vec3 | [number, number]): number {
+  const q: Vec3 = p.length === 3 ? p : [p[0], (box.min[1] + box.max[1]) / 2, p[1]]
+  const dx = Math.max(box.min[0] - q[0], 0, q[0] - box.max[0])
+  const dy = Math.max(box.min[1] - q[1], 0, q[1] - box.max[1])
+  const dz = Math.max(box.min[2] - q[2], 0, q[2] - box.max[2])
+  return Math.hypot(dx, dy, dz)
+}
 
 function vec(value: unknown, limit: number, minY = -100, maxY = CEILING): Vec3 | null {
   if (!Array.isArray(value) || value.length !== 3) return null
@@ -372,6 +391,7 @@ export class RealtimeService implements OnModuleDestroy {
       items: [...world.items.values()],
       wrecks: [...world.wrecks.keys()],
       vehicleHp: Object.fromEntries(world.vehicleHp),
+      ships: world.ships,
       barrels: [...world.barrels].map(([id, b]) => ({ id, x: b.x, z: b.z, alive: b.alive })),
     })
     const myVitals = this.vitalsOf(roomId, user.id)
@@ -386,6 +406,7 @@ export class RealtimeService implements OnModuleDestroy {
         items: new Map(initialItems().map((item) => [item.id, item])), dropped: [], wrecks: new Map(), vehiclePoses: new Map(), timers: new Set(),
         vehicleHp: new Map(), ejectLocks: new Map(), grenades: new Map(),
         barrels: new Map(BARRELS.map((b) => [b.id, { x: b.x, z: b.z, hp: BARREL_HP, alive: true }])),
+        ships: { blue: { hp: SHIP_MAX_HP, wrecked: false }, red: { hp: SHIP_MAX_HP, wrecked: false } },
       }
       this.worlds.set(roomId, world)
     }
@@ -508,6 +529,16 @@ export class RealtimeService implements OnModuleDestroy {
     const from = this.firingPoint(shooter.state)
     const world = this.worldOf(roomId)
 
+    // Rounds into a capital ship's hull (lasers bite harder than bullets)
+    const shipTeam = message.ship === 'blue' || message.ship === 'red' ? message.ship : null
+    if (shipTeam) {
+      if (shipTeam === shooter.team) return
+      const p = shooter.state.vehicle?.p ?? shooter.state.p
+      if (boxDistance(SHIP_HULL[shipTeam], p) > weapon.range + RANGE_SLACK) return
+      shooterVitals.lastShotAt = now
+      this.damageShip(roomId, shipTeam, weapon.power * (weaponId === 'fighter-laser' ? 0.8 : 0.2), shooter.userId)
+      return
+    }
     const barrelId = typeof message.barrel === 'string' ? message.barrel : null
     if (barrelId) {
       const barrel = world.barrels.get(barrelId)
@@ -661,11 +692,50 @@ export class RealtimeService implements OnModuleDestroy {
       const armour = vk === 'tank' ? spec.tank : vk === 'mech' ? (1 + spec.tank) / 2 : 1
       if (d < spec.radius) this.damageVehicle(roomId, vehicleId, spec.vehicle * armour * (1 - d / spec.radius), by, kind)
     }
+    // The capital ships (not your own)
+    if (at[1] !== null && spec.ship > 0) {
+      for (const team of ['blue', 'red'] as Team[]) {
+        if (attacker?.team === team) continue
+        const d = boxDistance(SHIP_HULL[team], [at[0], at[1], at[2]])
+        if (d < spec.radius) this.damageShip(roomId, team, spec.ship * (1 - d / spec.radius), by)
+      }
+    }
     for (const [id, barrel] of world.barrels) {
       if (!barrel.alive || Math.hypot(barrel.x - at[0], barrel.z - at[2]) > spec.radius * 0.8) continue
       // Chain reaction, a moment later
       this.later(roomId, 180, () => this.blowBarrel(roomId, id, by))
     }
+  }
+
+  /** A capital ship takes damage; at zero it blows up with everyone aboard and is a burning wreck until repaired. */
+  private damageShip(roomId: string, team: Team, amount: number, by: string) {
+    const ship = this.worldOf(roomId).ships[team]
+    if (ship.wrecked || amount <= 0) return
+    ship.hp = Math.max(0, ship.hp - amount)
+    this.broadcast(roomId, { type: 'ship', team, hp: Math.round(ship.hp), wrecked: false })
+    if (ship.hp > 0) return
+    ship.wrecked = true
+    this.broadcast(roomId, { type: 'ship', team, hp: 0, wrecked: true, by })
+    const box = SHIP_ABOARD[team]
+    for (const conn of this.rooms.get(roomId)?.values() ?? []) {
+      const p = conn.state?.p
+      if (!p || this.vitalsOf(roomId, conn.userId).dead) continue
+      if (p[0] >= box.min[0] && p[0] <= box.max[0] && p[1] >= box.min[1] && p[1] <= box.max[1] && p[2] >= box.min[2] && p[2] <= box.max[2]) this.kill(roomId, conn, by, 'ship')
+    }
+    void this.announceShip(roomId, team, by)
+    this.later(roomId, SHIP_WRECK_MS, () => {
+      ship.hp = SHIP_MAX_HP
+      ship.wrecked = false
+      this.broadcast(roomId, { type: 'ship', team, hp: SHIP_MAX_HP, wrecked: false })
+    })
+  }
+
+  /** Discord: a capital ship went down. */
+  private async announceShip(roomId: string, team: Team, by: string) {
+    if (!this.discord.enabled) return
+    const [roster, room] = await Promise.all([this.roomService.matchRoster(roomId), this.roomService.roomName(roomId)])
+    const hero = roster?.players.find((p) => p.id === by)
+    this.discord.post({ title: `The ${team === 'red' ? 'red' : 'blue'} capital ship is down!`, description: `${hero ? `**${plain(hero.displayName)}**` : 'Someone'} destroyed it in ${plain(room)}.`, color: DISCORD_COLOR.gold })
   }
 
   private blowBarrel(roomId: string, id: string, by: string) {
@@ -687,14 +757,25 @@ export class RealtimeService implements OnModuleDestroy {
    * fly to where it was aimed, and it goes off there when it arrives.
    */
   private fire(roomId: string, shooter: Connection, message: Record<string, unknown>) {
-    const kind = message.kind === 'shell' || message.kind === 'rocket' ? message.kind : null
+    const kind = message.kind === 'shell' || message.kind === 'rocket' || message.kind === 'pulse' || message.kind === 'cannon' ? message.kind : null
     const to = vec(message.to, 600, -100, 600)
     const state = shooter.state
     const vitals = this.vitalsOf(roomId, shooter.userId)
     if (!kind || !to || !state || vitals.dead) return
     const now = Date.now()
     let from: Vec3
-    if (kind === 'shell') {
+    if (kind === 'pulse' || kind === 'cannon') {
+      // From a manned gun: a pulse cannon, or (at a ship's bridge console) that ship's main cannon
+      const gun = state.gun
+      const team = gun ? (gun.id.startsWith('blue') ? 'blue' : 'red') : null
+      const commanding = !!gun && !!team && gun.id === bridgeId(team)
+      if (!gun || state.vehicle || commanding !== (kind === 'cannon')) return
+      if (kind === 'cannon' && this.worldOf(roomId).ships[team!].wrecked) return
+      const gap = kind === 'cannon' ? CANNON_INTERVAL_MS : PULSE_INTERVAL_MS
+      if (now - vitals.lastCannonAt < gap * FIRE_RATE_SLACK) return
+      vitals.lastCannonAt = now
+      from = kind === 'cannon' ? SHIP_CANNON[team!] : state.p
+    } else if (kind === 'shell') {
       const v = state.vehicle
       if (!v || v.seat !== 0 || kindOf(v.id) !== 'tank' || now - vitals.lastCannonAt < TANK_RELOAD_MS * FIRE_RATE_SLACK) return
       vitals.lastCannonAt = now
@@ -712,7 +793,7 @@ export class RealtimeService implements OnModuleDestroy {
       from = state.p
     }
     const distance = Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2])
-    if (distance > (kind === 'shell' ? 650 : 450)) return
+    if (distance > (kind === 'shell' ? 650 : kind === 'cannon' ? 1300 : kind === 'pulse' ? 600 : 450)) return
     const muzzle = vec(message.from, 600) ?? from
     this.broadcast(roomId, { type: 'fire', id: shooter.userId, kind, from: muzzle, to }, shooter.userId)
     this.later(roomId, (distance / PROJECTILE_SPEED[kind]) * 1000, () => this.explode(roomId, to, kind, shooter.userId))

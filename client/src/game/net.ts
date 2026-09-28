@@ -94,12 +94,15 @@ export interface NetHandlers {
   onVehicleHp: (id: string, hp: number, max: number) => void
   /** An explosive barrel went up (or is back). */
   onBarrel: (id: string, alive: boolean) => void
+  /** A capital ship's hull changed (`by` set when it was just destroyed). */
+  onShip: (team: 'blue' | 'red', hp: number, wrecked: boolean, by: string) => void
   onError: (message: string) => void
   onConnection: (connected: boolean) => void
 }
 
-export type ProjectileKind = 'shell' | 'rocket'
-export type BlastKind = 'shell' | 'rocket' | 'grenade' | 'barrel'
+export type ProjectileKind = 'shell' | 'rocket' | 'pulse' | 'cannon'
+export type BlastKind = 'shell' | 'rocket' | 'grenade' | 'barrel' | 'pulse' | 'cannon'
+export type ShipState = { hp: number; wrecked: boolean }
 
 export interface WorldSnapshot {
   vehicles: VehiclePoses
@@ -107,6 +110,8 @@ export interface WorldSnapshot {
   wrecks: string[]
   /** Hull strength of damaged vehicles (full when missing). */
   vehicleHp: Record<string, number>
+  /** The capital ships' hulls. */
+  ships: Record<'blue' | 'red', ShipState> | null
   barrels: Array<{ id: string; alive: boolean }>
 }
 
@@ -150,6 +155,7 @@ export class Multiplayer {
             items: (message.items ?? []) as NetItem[],
             wrecks: (message.wrecks ?? []) as string[],
             vehicleHp: (message.vehicleHp ?? {}) as Record<string, number>,
+            ships: (message.ships ?? null) as Record<'blue' | 'red', ShipState> | null,
             barrels: (message.barrels ?? []) as WorldSnapshot['barrels'],
           })
           break
@@ -176,6 +182,7 @@ export class Multiplayer {
         case 'boom': this.handlers.onBoom(message.at as [number, number | null, number], message.kind as BlastKind, String(message.by)); break
         case 'vhp': this.handlers.onVehicleHp(String(message.id), Number(message.hp), Number(message.max)); break
         case 'barrel': this.handlers.onBarrel(String(message.id), message.alive === true); break
+        case 'ship': this.handlers.onShip(message.team === 'red' ? 'red' : 'blue', Number(message.hp), message.wrecked === true, String(message.by ?? '')); break
         case 'error':
           this.fatal = true
           this.handlers.onError(String(message.message))
@@ -216,7 +223,7 @@ export class Multiplayer {
   }
 
   /** A round of ours struck a player, a vehicle's hull (and whoever is inside) or an explosive barrel. */
-  sendHit(weapon: string, what: { target?: string; vehicle?: string; barrel?: string }) {
+  sendHit(weapon: string, what: { target?: string; vehicle?: string; barrel?: string; ship?: 'blue' | 'red' }) {
     this.send({ type: 'hit', weapon, ...what })
   }
 

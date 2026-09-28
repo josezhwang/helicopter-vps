@@ -66,11 +66,31 @@ const DECK_GUNS: Record<Team, Array<[number, number]>> = {
   red: [[314, 396], [284, 396], [254, 396]],
 }
 
+/**
+ * The capital ships (must match the client's layout.ts): each hull as a world box (noses along X), the flight deck
+ * and hangar where players can be aboard, the command bridge console in the hangar (a gun position: whoever stands
+ * at it commands the ship's main cannon) and that cannon on top of the hull.
+ */
+export const SHIP_MAX_HP = 6000
+export const SHIP_HULL: Record<Team, { min: [number, number, number]; max: [number, number, number] }> = {
+  blue: { min: [-454, 650, -371], max: [-154, 750, -237] },
+  red: { min: [154, 650, 237], max: [454, 750, 371] },
+}
+export const SHIP_ABOARD: Record<Team, { min: [number, number, number]; max: [number, number, number] }> = {
+  blue: { min: [-364, 698, -400], max: [-244, 716, -376] },
+  red: { min: [244, 698, 376], max: [364, 716, 400] },
+}
+export const SHIP_BRIDGE: Record<Team, [number, number]> = { blue: [-361, -381], red: [361, 381] }
+export const SHIP_CANNON: Record<Team, [number, number, number]> = { blue: [-244, 754, -304], red: [244, 754, 304] }
+export const bridgeId = (team: Team) => `${team}-mg-${MACHINE_GUNS.length + DECK_GUNS[team].length}`
+
 /** Machine guns by id (`<team>-mg-<n>`), world XZ. */
 export const MACHINE_GUN_SPOTS = new Map<string, [number, number]>([
   ...TEAMS.flatMap((team) => MACHINE_GUNS.map((spot, i) => [`${team}-mg-${i}`, baseToWorld(team, ...spot)] as const)),
   // The heavy guns on each capital ship's flight deck, high over the map (world XZ; must match the client's DECK_GUNS)
   ...TEAMS.flatMap((team) => DECK_GUNS[team].map((spot, i) => [`${team}-mg-${MACHINE_GUNS.length + i}`, spot] as const)),
+  // Each ship's command bridge console
+  ...TEAMS.map((team) => [bridgeId(team), SHIP_BRIDGE[team]] as const),
 ])
 
 /** Must match client/src/game/world/weapons.ts */

@@ -17,7 +17,7 @@ import {
 import { FIGHTER_LANDED } from './world/vehicles'
 import { fighterSpec } from './world/fighters'
 import { createSpaceZone, type SpaceZone } from './world/space'
-import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, DECK, DECK_GUNS, DECK_TOP, LAYOUT, PLATEAU_HALF, SHIP_CENTER, TELEPORTS, baseToWorld, baseYaw } from './world/layout'
+import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, DECK, DECK_GUNS, DECK_TOP, LAYOUT, PLATEAU_HALF, SHIP_BRIDGE, SHIP_CANNON, SHIP_CENTER, SHIP_MAX_HP, SHIP_YAW, TELEPORTS, baseToWorld, baseYaw, bridgeId } from './world/layout'
 import { createOutposts, type Outposts } from './world/outposts'
 import { createGrenades, GRENADE_FUSE, THROW_SPEED, type Grenades } from './world/grenades'
 import { GameAudio, type LoopSource, type ShotSound } from './world/audio'
@@ -93,6 +93,11 @@ const WORLD_LIMIT = 480
 const IRON_WORLD = true
 /** How close to a teleport pad's middle you have to stand. */
 const TELEPORT_RADIUS = 1.8
+/** The AA / deck guns fire slow, heavy balls of plasma that burst (made for aircraft and armour). */
+const PULSE = { fireRate: 0.55, speed: 150, range: 520, size: 1.1, color: 0xff7a2e }
+/** A capital ship's main cannon, fired from its bridge: huge plasma shells. */
+const SHIP_GUN = { reload: 2.4, speed: 170, range: 1250, size: 3.4 }
+const SHIP_GLOW: Record<Team, number> = { blue: 0x6fc8ff, red: 0xff8a4a }
 /** Seconds to climb into / out of a helicopter. */
 const BOARD_TIME = 1.5
 const EXIT_TIME = 1.1
@@ -170,10 +175,10 @@ const MAX_LIVE_GRENADES = 3
 const KILL_FEED_MS = 7000
 const KILL_FEED_SIZE = 5
 /** How big each kind of explosion looks and sounds. */
-const BLAST_SIZE: Record<BlastKind, number> = { shell: 1.5, rocket: 1.4, grenade: 1, barrel: 1.8 }
+const BLAST_SIZE: Record<BlastKind, number> = { shell: 1.5, rocket: 1.4, grenade: 1, barrel: 1.8, pulse: 0.8, cannon: 2.8 }
 /** What the kill feed calls each way to die (weapons use their own names). */
 const HOW_LABEL: Record<string, string> = {
-  'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Gunship ball turret', 'fighter-laser': 'Fighter lasers', 'fighter-missile': 'Fighter missile', missile: 'AA missile', shell: 'Tank shell', rocket: 'Rocket',
+  'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Gunship ball turret', 'fighter-laser': 'Fighter lasers', 'fighter-missile': 'Fighter missile', pulse: 'Pulse cannon', cannon: 'Ship cannon', ship: 'Capital ship explosion', missile: 'Rocket', shell: 'Tank shell', rocket: 'Rocket',
   grenade: 'Grenade', barrel: 'Barrel', wreck: 'Wreck', melee: 'Melee', assassination: 'Assassination',
 }
 /** Melee: how far a strike reaches (the server allows a little more), how often, and the lunge's speed. */
@@ -287,6 +292,14 @@ export class BattlefieldGame {
   /** Teleport pads: a pad works once you've stepped off the last one, and not twice within a moment. */
   private teleportArmed = true
   private teleportReadyAt = 0
+  /** Each ship's command bridge (manned like a gun: it turns the main cannon), and when our cannon may fire again. */
+  private bridges: Record<Team, Turret> = {
+    blue: { id: bridgeId('blue'), x: SHIP_BRIDGE.blue.x, z: SHIP_BRIDGE.blue.z, y: DECK_TOP, facing: SHIP_YAW.blue, yaw: 0, pitch: 0, idle: true, occupant: null, recoil: 0 },
+    red: { id: bridgeId('red'), x: SHIP_BRIDGE.red.x, z: SHIP_BRIDGE.red.z, y: DECK_TOP, facing: SHIP_YAW.red, yaw: 0, pitch: 0, idle: true, occupant: null, recoil: 0 },
+  }
+  private shipCannonAt = 0
+  /** The capital ships' hulls. */
+  private ships: Record<Team, { hp: number; wrecked: boolean }> = { blue: { hp: SHIP_MAX_HP, wrecked: false }, red: { hp: SHIP_MAX_HP, wrecked: false } }
   /** Seconds until the next melee strike. */
   private meleeTimer = 0
   /** Kills since our last death, the current multi-kill chain and when its last kill landed. */
@@ -479,7 +492,7 @@ export class BattlefieldGame {
 
     // Everything that stops a bullet: terrain, bases, trees, rocks, vehicles, machine guns (player avatars are
     // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
-    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group, this.outposts.blockers, this.space.solids]
+    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group, this.outposts.blockers, this.space.solids, this.space.hulls]
     this.sightBlockers = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.outposts.blockers, this.space.solids]
 
     // Debug handle for console/preview smoke tests
@@ -607,7 +620,7 @@ export class BattlefieldGame {
     if (!s) return null
     if (s.vehicle) return new THREE.Vector3(...s.vehicle.p)
     if (s.gun) {
-      const t = this.turrets.turrets.find((g) => g.id === s.gun!.id)
+      const t = this.allGuns().find((g) => g.id === s.gun!.id)
       if (t) return new THREE.Vector3(t.x, turretGround(t) + 1.5, t.z)
     }
     return remote.avatar?.group.visible ? remote.avatar.group.position.clone() : new THREE.Vector3(...s.p)
@@ -822,6 +835,16 @@ export class BattlefieldGame {
     const remote = this.remotes.get(id)
     if (remote) remote.lastFiredAt = performance.now()
     const dir = end.clone().sub(start).normalize()
+    if (kind === 'pulse' || kind === 'cannon') {
+      const gun = remote?.target?.gun ? this.allGuns().find((g) => g.id === remote.target!.gun!.id) : undefined
+      if (gun) gun.recoil = 1
+      const team = this.bridgeTeam(gun ?? null)
+      if (kind === 'cannon' && team) this.space.aimCannon(team, gun!.facing + gun!.yaw, -gun!.pitch, true)
+      this.projectiles.plasma(start, end, kind === 'cannon' ? SHIP_GUN.size : PULSE.size, kind === 'cannon' ? SHIP_GUN.speed : PULSE.speed, kind === 'cannon' ? SHIP_GLOW[team ?? 'blue'] : PULSE.color)
+      this.projectiles.muzzleFlash(start, dir, kind === 'cannon' ? 6 : 2.4)
+      this.audio.shot('cannon', start, kind === 'cannon' ? 1.2 : 0.55)
+      return
+    }
     if (kind === 'shell') {
       const tank = remote?.target?.vehicle ? this.fleet.byId.get(remote.target.vehicle.id) : undefined
       if (tank) tank.gunRecoil = 1
@@ -960,6 +983,7 @@ export class BattlefieldGame {
       vehicle.object.rotation.set(pose.r[0], pose.r[1], pose.r[2])
     }
     for (const vehicle of this.fleet.vehicles) vehicle.hp = world.vehicleHp[vehicle.id] ?? VEHICLE_MAX_HP[vehicle.kind]
+    if (world.ships) for (const team of ['blue', 'red'] as Team[]) this.shipChanged(team, world.ships[team].hp, world.ships[team].wrecked)
     for (const id of world.wrecks) {
       const vehicle = this.fleet.byId.get(id)
       if (vehicle) vehicle.destroyed = true
@@ -1206,8 +1230,17 @@ export class BattlefieldGame {
     }
   }
 
+  /** Every gun position: the machine / pulse guns, and the two ships' bridges. */
+  private allGuns(): Turret[] {
+    return [...this.turrets.turrets, this.bridges.blue, this.bridges.red]
+  }
+
+  private bridgeTeam(t: Turret | null): Team | null {
+    return t === this.bridges.blue ? 'blue' : t === this.bridges.red ? 'red' : null
+  }
+
   private releaseGunsOf(playerId: string) {
-    for (const t of this.turrets.turrets) {
+    for (const t of this.allGuns()) {
       if (t.occupant !== playerId) continue
       t.occupant = null
       t.idle = true
@@ -1221,6 +1254,11 @@ export class BattlefieldGame {
    */
   private reportHit(object: THREE.Object3D, weapon: string) {
     for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+      const shipTeam = node.userData.shipTeam as Team | undefined
+      if (shipTeam) {
+        if (shipTeam !== this.team && !this.ships[shipTeam].wrecked) this.match.net.sendHit(weapon, { ship: shipTeam })
+        return
+      }
       const playerId = node.userData.playerId as string | undefined
       if (playerId) {
         const remote = this.remotes.get(playerId)
@@ -1345,7 +1383,7 @@ export class BattlefieldGame {
       this.syncRemoteVehicle(remote.info.id, s, k)
       // On a machine gun: the gun follows their aim on our screen too
       if (s.gun) {
-        const t = this.turrets.turrets.find((g) => g.id === s.gun!.id)
+        const t = this.allGuns().find((g) => g.id === s.gun!.id)
         if (t && t !== this.turret) {
           gunners.add(t.id)
           t.occupant = remote.info.id
@@ -1355,7 +1393,7 @@ export class BattlefieldGame {
         }
       }
     }
-    for (const t of this.turrets.turrets) {
+    for (const t of this.allGuns()) {
       if (t.occupant && t !== this.turret && !gunners.has(t.id)) {
         t.occupant = null
         t.idle = true
@@ -1713,7 +1751,7 @@ export class BattlefieldGame {
       const distance = Math.hypot(p.x - v.x, p.z - v.z)
       if (distance < BOARD_RANGE[vehicle.kind] && (!best || distance < best.distance)) best = { vehicle, distance }
     }
-    for (const turret of this.turrets.turrets) {
+    for (const turret of this.allGuns()) {
       if (Math.abs(p.y - EYE_HEIGHT - turretGround(turret)) > 3) continue
       const distance = Math.hypot(p.x - turret.x, p.z - turret.z)
       if (distance < GUN_RANGE && (!best || distance < best.distance)) best = { turret, distance }
@@ -1725,7 +1763,11 @@ export class BattlefieldGame {
     if (!this.onFoot) return ''
     const choice = this.nearestInteraction()
     if (!choice) return ''
-    if (choice.turret) return choice.turret.occupant ? `Machine gun (manned by ${this.nameOf(choice.turret.occupant)})` : 'Man the machine gun'
+    if (choice.turret) {
+      const bridge = this.bridgeTeam(choice.turret)
+      if (bridge) return choice.turret.occupant ? `Bridge (${this.nameOf(choice.turret.occupant)} is in command)` : this.ships[bridge].wrecked ? 'Bridge (the ship is wrecked)' : `Take command of the ${bridge === this.team ? '' : 'enemy '}ship's main cannon`
+      return choice.turret.occupant ? `Pulse cannon (manned by ${this.nameOf(choice.turret.occupant)})` : 'Man the pulse cannon'
+    }
     const vehicle = choice.vehicle!
     if (vehicle.destroyed) return `Wrecked ${label(vehicle)}`
     const enemies = this.enemiesAboard(vehicle)
@@ -2549,7 +2591,13 @@ export class BattlefieldGame {
     this.player.yaw = turret.facing + turret.yaw + Math.PI
     this.player.pitch = -turret.pitch
     this.mouse.shooting = false
-    setGameState({ onGun: true, message: 'Machine gun: aim with the mouse, LMB fires slow, heavy rounds. E to leave it.' })
+    const bridge = this.bridgeTeam(turret)
+    setGameState({
+      onGun: true,
+      message: bridge
+        ? 'SHIP COMMAND: the main cannon on top of the hull follows your aim. LMB fires a huge plasma shell (reload 2.4 s) — hit the enemy capital ship, aircraft, anything. E to leave the bridge.'
+        : 'Pulse cannon: aim with the mouse, LMB fires heavy plasma bolts that burst — made for aircraft and tanks. E to leave it.',
+    })
   }
 
   private leaveTurret() {
@@ -2558,7 +2606,7 @@ export class BattlefieldGame {
     this.turret = null
     if (turret.occupant === this.match.you) turret.occupant = null
     turret.idle = true
-    setGameState({ onGun: false })
+    setGameState({ onGun: false, cannon: -1 })
   }
 
   /** The server says someone else is already on this gun. */
@@ -2572,6 +2620,11 @@ export class BattlefieldGame {
   private updateTurret(dt: number) {
     const turret = this.turret
     if (!turret) return
+    const bridge = this.bridgeTeam(turret)
+    if (bridge) {
+      this.updateBridge(turret, bridge)
+      return
+    }
     this.player.pitch = THREE.MathUtils.clamp(this.player.pitch, -GUN_PITCH_DOWN, GUN_PITCH_UP)
     turret.yaw = wrap(this.player.yaw + Math.PI - turret.facing)
     turret.pitch = -this.player.pitch
@@ -2591,26 +2644,88 @@ export class BattlefieldGame {
     const view = this.camera.getWorldDirection(new THREE.Vector3())
     view.add(new THREE.Vector3((Math.random() - 0.5) * MACHINE_GUN.spread, (Math.random() - 0.5) * MACHINE_GUN.spread, 0)).normalize()
     // The eye sits above and behind the barrel: find what the crosshair is on, then fire from the muzzle at it
+    // A pulse cannon: find what the crosshair is on, then send a ball of plasma there from the muzzle; it bursts
+    // where it arrives (the server's blast does the damage)
     const targets = this.shootTargets().filter((t) => t !== this.turrets.group)
-    const sight = new THREE.Raycaster(eye, view, 0, MACHINE_GUN.range).intersectObjects(targets, true)[0]
-    const aim = sight?.point ?? eye.clone().addScaledVector(view, MACHINE_GUN.range)
+    const sight = new THREE.Raycaster(eye, view, 0, PULSE.range).intersectObjects(targets, true)[0]
+    const aim = sight?.point ?? eye.clone().addScaledVector(view, PULSE.range)
     const dir = aim.clone().sub(muzzle).normalize()
-    const origin = muzzle.clone().addScaledVector(dir, 0.4)
-    const hits = new THREE.Raycaster(origin, dir, 0, MACHINE_GUN.range).intersectObjects(targets, true)
-    const end = hits[0]?.point.clone() ?? origin.clone().addScaledVector(dir, MACHINE_GUN.range)
-    this.projectiles.round('bullet_heavy', muzzle, end, MACHINE_GUN.color)
-    this.projectiles.muzzleFlash(muzzle, dir, 1.8)
-    this.audio.shot('mg', null)
-    this.ejectCasing('bullet_heavy', muzzle.clone().addScaledVector(dir, -1.6), dir)
+    const hit = new THREE.Raycaster(muzzle.clone().addScaledVector(dir, 0.6), dir, 0, PULSE.range).intersectObjects(targets, true)[0]
+    const end = hit?.point.clone() ?? muzzle.clone().addScaledVector(dir, PULSE.range)
+    this.gunCooldown = PULSE.fireRate
+    this.match.net.sendFire('pulse', [muzzle.x, muzzle.y, muzzle.z], [end.x, end.y, end.z])
+    this.projectiles.plasma(muzzle, end, PULSE.size, PULSE.speed, PULSE.color, () => this.explodeAt(end, 'pulse'))
+    this.projectiles.muzzleFlash(muzzle, dir, 2.4)
+    this.audio.shot('cannon', null, 0.55)
     turret.recoil = 1
-    this.match.net.sendShot([end.x, end.y, end.z], MACHINE_GUN.id)
-    if (hits[0]) {
-      this.applyImpact(hits[0], dir, true)
-      this.reportHit(hits[0].object, MACHINE_GUN.id)
-    }
     // A heavy gun shakes the gunner
     this.player.pitch += 0.018
     this.player.yaw += (Math.random() - 0.5) * 0.01
+  }
+
+  /**
+   * At a ship's bridge: the view rides behind the main cannon on top of the hull, the cannon follows our aim, LMB
+   * fires a huge plasma shell (the server's blast does the damage) — while the ship isn't a wreck.
+   */
+  private updateBridge(bridge: Turret, team: Team) {
+    this.player.pitch = THREE.MathUtils.clamp(this.player.pitch, -0.6, 0.7)
+    bridge.yaw = wrap(this.player.yaw + Math.PI - bridge.facing)
+    bridge.pitch = -this.player.pitch
+    this.space.aimCannon(team, this.player.yaw + Math.PI, this.player.pitch)
+    const muzzle = new THREE.Vector3(), barrel = new THREE.Vector3()
+    this.space.cannonMuzzle(team, muzzle, barrel)
+    const c = SHIP_CANNON[team]
+    const view = new THREE.Vector3(-Math.sin(this.player.yaw) * Math.cos(this.player.pitch), Math.sin(this.player.pitch), -Math.cos(this.player.yaw) * Math.cos(this.player.pitch))
+    this.camera.position.set(c.x, c.y + 9, c.z).addScaledVector(view, -26)
+    this.camera.rotation.order = 'YXZ'
+    this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
+    // Our body stays at the console
+    this.player.position.set(bridge.x, DECK_TOP + EYE_HEIGHT, bridge.z)
+    this.player.velocity.set(0, 0, 0)
+    const now = performance.now()
+    const wrecked = this.ships[team].wrecked
+    setGameState({ cannon: wrecked ? 0 : Math.max(0, Math.min(1, 1 - (this.shipCannonAt - now) / (SHIP_GUN.reload * 1000))) })
+    if (!this.mouse.shooting || wrecked || now < this.shipCannonAt) return
+    this.shipCannonAt = now + SHIP_GUN.reload * 1000
+    const eye = this.camera.position.clone()
+    const targets = [...this.shootTargets(), this.space.hulls]
+    const sight = new THREE.Raycaster(eye, view, 30, SHIP_GUN.range).intersectObjects(targets, true).find((h) => h.object.userData.shipTeam !== team)
+    const aim = sight?.point ?? eye.clone().addScaledVector(view, SHIP_GUN.range)
+    this.match.net.sendFire('cannon', [muzzle.x, muzzle.y, muzzle.z], [aim.x, aim.y, aim.z])
+    this.projectiles.plasma(muzzle, aim, SHIP_GUN.size, SHIP_GUN.speed, SHIP_GLOW[team], () => this.explodeAt(aim, 'cannon'))
+    this.projectiles.muzzleFlash(muzzle, barrel, 6)
+    this.flashLight(muzzle, SHIP_GLOW[team], 6000, 0.4)
+    this.audio.shot('cannon', null, 1.2)
+    this.space.aimCannon(team, this.player.yaw + Math.PI, this.player.pitch, true)
+    this.shake = Math.min(1.4, this.shake + 0.5)
+  }
+
+  /** A capital ship's hull changed (from the server): the HUD bars, and a wreck when it's destroyed. */
+  shipChanged(team: Team, hp: number, wrecked: boolean, by = '') {
+    const was = this.ships[team]
+    this.ships[team] = { hp, wrecked }
+    setGameState({ ships: { blue: this.ships.blue.hp / SHIP_MAX_HP, red: this.ships.red.hp / SHIP_MAX_HP } })
+    if (wrecked === was.wrecked) return
+    this.space.setWrecked(team, wrecked)
+    if (!wrecked) {
+      setGameState({ message: `The ${team} capital ship is repaired and back in the fight.` })
+      return
+    }
+    // A chain of blasts along the hull, then it burns
+    const c = SHIP_CENTER[team]
+    for (let k = 0; k < 7; k++) {
+      window.setTimeout(() => {
+        const at = new THREE.Vector3(c.x + (Math.random() - 0.5) * 240, 700 + (Math.random() - 0.3) * 50, c.z + (Math.random() - 0.5) * 90)
+        this.projectiles.explosion(at, 4 + Math.random() * 3, false)
+        this.flashLight(at, 0xff8a3a, 9000, 0.8)
+        this.audio.explosion(at, 3)
+      }, k * 260)
+    }
+    this.projectiles.burn(() => (this.ships[team].wrecked ? new THREE.Vector3(c.x + (Math.random() - 0.5) * 200, 720, c.z + (Math.random() - 0.5) * 60) : null), 60)
+    const byName = by === this.match.you ? 'You' : by ? this.nameOf(by) : 'Someone'
+    setGameState({ message: `${byName} destroyed the ${team === this.team ? 'our' : 'enemy'} capital ship!`.replace('the our', 'our') })
+    if (by === this.match.you && team !== this.team) this.announce('CAPITAL SHIP DESTROYED')
+    if (this.turret === this.bridges[team]) this.leaveTurret()
   }
 
   /** A spent casing flung out to the right of a gun firing along `dir`. */
@@ -2971,6 +3086,11 @@ export class BattlefieldGame {
       this.updateRemotes(realDt)
       this.updateShadowArea()
       this.space.update(dt, this.camera.position)
+      // Ships commanded by someone else: their main cannon follows the commander's aim
+      for (const team of ['blue', 'red'] as Team[]) {
+        const bridge = this.bridges[team]
+        if (bridge.occupant && bridge !== this.turret) this.space.aimCannon(team, bridge.facing + bridge.yaw, -bridge.pitch)
+      }
       this.water.update(time)
       this.updateFlashes()
       this.bases.blue.gem.update(time)

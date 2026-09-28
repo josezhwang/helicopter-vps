@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { firstMeshGeometry, loadModel, toStandardMaterial } from './assets'
-import { DECK, DECK_TOP, HANGAR, HANGAR_HEIGHT, SHIP_ALTITUDE, SHIP_CENTER, SHIP_YAW, TELEPORTS, type Team } from './layout'
+import { DECK, DECK_TOP, HANGAR, HANGAR_HEIGHT, SHIP_ALTITUDE, SHIP_BRIDGE, SHIP_CANNON, SHIP_CENTER, SHIP_HULL, SHIP_YAW, TELEPORTS, type Team } from './layout'
 import { addFloor } from './floors'
 import { heightAt } from './terrain'
 import { ORBIT_START } from './sky'
@@ -17,6 +17,14 @@ export interface SpaceZone {
   colliders: THREE.Box3[]
   /** The decks' and hangars' solid parts, for rounds to hit. */
   solids: THREE.Group
+  /** Invisible boxes round each hull (userData.shipTeam), for rounds to hit the ships. */
+  hulls: THREE.Group
+  /** Point a ship's main cannon (world heading, pitch: + raises it); `recoil` kicks it back. */
+  aimCannon: (team: Team, heading: number, pitch: number, recoil?: boolean) => void
+  /** Where a ship's cannon muzzle is and which way it points (world). */
+  cannonMuzzle: (team: Team, out: THREE.Vector3, dir: THREE.Vector3) => void
+  /** Show a ship whole or as a dark, burning wreck. */
+  setWrecked: (team: Team, wrecked: boolean) => void
   update: (dt: number, camera: THREE.Vector3) => void
   dispose: () => void
 }
@@ -211,6 +219,75 @@ export function createSpaceZone(): SpaceZone {
     }
   }
 
+  // Hit boxes round the hulls
+  const hulls = new THREE.Group()
+  hulls.name = 'ship-hulls'
+  group.add(hulls)
+  const hullMaterial = new THREE.MeshBasicMaterial({ visible: false })
+  deckMaterials.push(hullMaterial)
+  for (const team of ['blue', 'red'] as Team[]) {
+    const h = SHIP_HULL[team]
+    // Two boxes: the full-height middle and the lower bow and stern
+    const len = h.max[0] - h.min[0]
+    for (const [f0, f1, y0, y1] of [[0.2, 0.8, 0, 1], [0, 1, 0.15, 0.62]]) {
+      const x0 = h.min[0] + len * f0, x1 = h.min[0] + len * f1
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, (h.max[1] - h.min[1]) * (y1 - y0), h.max[2] - h.min[2]), hullMaterial)
+      mesh.position.set((x0 + x1) / 2, h.min[1] + (h.max[1] - h.min[1]) * (y0 + y1) / 2, (h.min[2] + h.max[2]) / 2)
+      mesh.userData.shipTeam = team
+      hulls.add(mesh)
+    }
+  }
+
+  // Each ship's main battery: a heavy twin cannon on top of the hull, turned from the bridge
+  const cannons = {} as Record<Team, { yaw: THREE.Group; pitch: THREE.Group; recoil: number }>
+  const gunMetal = new THREE.MeshStandardMaterial({ color: 0x4a5058, metalness: 0.8, roughness: 0.35 })
+  deckMaterials.push(gunMetal)
+  for (const team of ['blue', 'red'] as Team[]) {
+    const c = SHIP_CANNON[team]
+    const glow = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: TEAM_GLOW[team], emissiveIntensity: 2.4 })
+    deckMaterials.push(glow)
+    const mount = new THREE.Mesh(new THREE.CylinderGeometry(7, 9, 4, 20), gunMetal)
+    mount.position.set(c.x, c.y - 4, c.z)
+    group.add(mount)
+    const yaw = new THREE.Group()
+    yaw.position.set(c.x, c.y, c.z)
+    yaw.rotation.order = 'YXZ'
+    group.add(yaw)
+    const house = new THREE.Mesh(new THREE.BoxGeometry(10, 5, 12), gunMetal)
+    yaw.add(house)
+    const band = new THREE.Mesh(new THREE.BoxGeometry(10.2, 0.4, 12.2), glow)
+    band.position.y = 1.2
+    yaw.add(band)
+    const pitch = new THREE.Group()
+    pitch.position.set(0, 1, 3)
+    yaw.add(pitch)
+    for (const x of [-2.2, 2.2]) {
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 1, 22, 14).rotateX(Math.PI / 2).translate(0, 0, 11), gunMetal)
+      barrel.position.x = x
+      pitch.add(barrel)
+      const coil = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.15, 1.2, 14).rotateX(Math.PI / 2), glow)
+      coil.position.set(x, 0, 8)
+      pitch.add(coil)
+    }
+    for (const node of [mount, house, band]) node.raycast = () => {}
+    pitch.traverse((node) => { (node as THREE.Mesh).raycast = () => {} })
+    yaw.rotation.y = SHIP_YAW[team]
+    cannons[team] = { yaw, pitch, recoil: 0 }
+  }
+
+  // The command bridge console in each hangar: a glowing desk facing the room
+  for (const team of ['blue', 'red'] as Team[]) {
+    const b = SHIP_BRIDGE[team]
+    const glow = new THREE.MeshStandardMaterial({ color: 0x0a0f14, emissive: TEAM_GLOW[team], emissiveIntensity: 1.6 })
+    deckMaterials.push(glow)
+    const desk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.1, 3.2), gunMetal)
+    desk.position.set(b.x, DECK_TOP + 0.55, b.z)
+    const screen = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 2.8), glow)
+    screen.position.set(b.x - Math.sign(b.x) * 0.55, DECK_TOP + 1.7, b.z)
+    screen.rotation.z = Math.sign(b.x) * 0.25
+    for (const node of [desk, screen]) { node.raycast = () => {}; group.add(node) }
+  }
+
   // The station, far overhead
   const station = new THREE.Group()
   station.position.set(0, 1250, 0)
@@ -288,6 +365,29 @@ export function createSpaceZone(): SpaceZone {
     pushOut,
     colliders: walls,
     solids,
+    hulls,
+    aimCannon(team, heading, pitch, recoil = false) {
+      const cannon = cannons[team]
+      cannon.yaw.rotation.y = heading
+      cannon.pitch.rotation.x = -pitch
+      if (recoil) cannon.recoil = 1
+    },
+    cannonMuzzle(team, out, dir) {
+      const cannon = cannons[team]
+      cannon.pitch.updateWorldMatrix(true, false)
+      out.set(0, 0, 22).applyMatrix4(cannon.pitch.matrixWorld)
+      dir.set(0, 0, 1).transformDirection(cannon.pitch.matrixWorld)
+    },
+    setWrecked(team, wrecked) {
+      for (const [key, material] of shipMaterials) {
+        if (!key.startsWith(`${team}|`)) continue
+        const original = material.userData.original as { color: THREE.Color; emissive: number } | undefined
+        if (!original) material.userData.original = { color: material.color.clone(), emissive: material.emissiveIntensity }
+        const o = material.userData.original as { color: THREE.Color; emissive: number }
+        material.color.copy(o.color).multiplyScalar(wrecked ? 0.18 : 1)
+        material.emissiveIntensity = wrecked ? 0 : o.emissive
+      }
+    },
     update(dt, camera) {
       time += dt
       // Everything up here is out of sight from the ground bar the ships; skip the rocks unless we're near
@@ -304,6 +404,11 @@ export function createSpaceZone(): SpaceZone {
       // The ships ride gently on station
       station.rotation.y += dt * 0.01
       for (const beam of beams) beam.rotation.y += dt * 0.6
+      for (const team of ['blue', 'red'] as Team[]) {
+        const cannon = cannons[team]
+        cannon.recoil = Math.max(0, cannon.recoil - dt * 1.5)
+        cannon.pitch.position.z = 3 - cannon.recoil * cannon.recoil * 3
+      }
     },
     dispose() {
       for (const m of shipMaterials.values()) m.dispose()

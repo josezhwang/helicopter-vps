@@ -76,6 +76,8 @@ export interface GameState {
   rotorRpm: number
   /** Flying a fighter: height above the ground (m), and whether the boost is lit. */
   altitude: number
+  /** The capital ships' hull strength (0..1). */
+  ships: { blue: number; red: number }
   boost: boolean
   /** Car speed while driving, km/h. */
   speedKmh: number
@@ -154,6 +156,7 @@ const INITIAL_STATE: GameState = {
   score: 0,
   rotorRpm: 0,
   altitude: 0,
+  ships: { blue: 1, red: 1 },
   boost: false,
   speedKmh: 0,
   health: 100,

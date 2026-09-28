@@ -108,6 +108,11 @@ export interface Projectiles {
   missile: (from: THREE.Vector3, target: () => THREE.Vector3 | null, onArrive?: () => void, explode?: boolean) => void
   /** A tank shell: a glowing tracer racing to `to`, a wisp of smoke behind it. */
   shell: (from: THREE.Vector3, to: THREE.Vector3, onArrive?: () => void) => void
+  /**
+   * A big, slow ball of burning plasma (the AA guns' bolts, a capital ship's cannon shells): a glowing core that
+   * trails fire and smoke on its way to `to`. `size` scales it, `speed` in m/s.
+   */
+  plasma: (from: THREE.Vector3, to: THREE.Vector3, size: number, speed: number, color: number, onArrive?: () => void) => void
   /** Fire, smoke, debris and a flash; `ground` adds a ring of dust thrown up around it. */
   explosion: (at: THREE.Vector3, scale?: number, ground?: boolean) => void
   /** A puff of dark smoke (damaged vehicles trail it). */
@@ -128,6 +133,7 @@ export function createProjectiles(): Projectiles {
   const shells: Shell[] = []
   const particles: Particle[] = []
   const burners: Burner[] = []
+  const plasmas: Array<{ sprite: THREE.Sprite; halo: THREE.Sprite; position: THREE.Vector3; dir: THREE.Vector3; left: number; size: number; speed: number; color: number; onArrive?: () => void; trail: number }> = []
   const roundMeshes = new Map<RoundKind, { prop: Prop; meshes: THREE.InstancedMesh[] }>()
   const casingMeshes = new Map<CasingKind, THREE.InstancedMesh[]>()
   let missileMeshes: THREE.InstancedMesh[] = []
@@ -256,6 +262,20 @@ export function createProjectiles(): Projectiles {
       const dir = aim ? aim.clone().sub(from).normalize() : new THREE.Vector3(0, 1, 0)
       missiles.push({ position: from.clone(), velocity: dir.multiplyScalar(MISSILE_SPEED * 0.6), target, onArrive, explode, age: 0, smokeTimer: 0 })
     },
+    plasma(from, to, size, speed, color, onArrive) {
+      if (plasmas.length >= 40) plasmas.shift()?.sprite.removeFromParent()
+      const dir = to.clone().sub(from)
+      const left = dir.length()
+      const core = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color: 0xfff4d8, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }))
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }))
+      core.scale.setScalar(size * 1.1)
+      halo.scale.setScalar(size * 3.2)
+      core.add(halo)
+      halo.scale.divideScalar(size * 1.1)
+      core.position.copy(from)
+      group.add(core)
+      plasmas.push({ sprite: core, halo, position: from.clone(), dir: dir.normalize(), left, size, speed, color, onArrive, trail: 0 })
+    },
     shell(from, to, onArrive) {
       const dir = to.clone().sub(from)
       const left = dir.length()
@@ -363,6 +383,30 @@ export function createProjectiles(): Projectiles {
         for (const mesh of missileMeshes) mesh.setMatrixAt(slot, m)
       })
       for (const mesh of missileMeshes) { mesh.count = missiles.length; mesh.instanceMatrix.needsUpdate = true }
+
+      // Plasma: the ball flies on, pulsing, and sheds fire and smoke behind it
+      for (let i = plasmas.length - 1; i >= 0; i--) {
+        const b = plasmas[i]
+        const step = Math.min(b.left, b.speed * dt)
+        b.position.addScaledVector(b.dir, step)
+        b.left -= step
+        b.sprite.position.copy(b.position)
+        const pulse = 1 + Math.sin(performance.now() * 0.03 + i) * 0.12
+        b.sprite.scale.setScalar(b.size * 1.1 * pulse)
+        b.trail -= dt
+        if (b.trail <= 0) {
+          b.trail = 0.016
+          emit(b.position.clone().addScaledVector(b.dir, -b.size * 0.6), b.dir.clone().multiplyScalar(-4).add(random(1.5)), 0.35, b.size * 1.4, b.size * 0.5, 0.9, true, i % 2 ? b.color : 0xffb040)
+          emit(b.position.clone().addScaledVector(b.dir, -b.size), random(1).add(new THREE.Vector3(0, 0.6, 0)), 1.2, b.size * 0.8, b.size * 2.4, 0.35, false, 0x3a3634, -0.2)
+        }
+        if (b.left <= 0.01) {
+          plasmas.splice(i, 1)
+          b.sprite.removeFromParent()
+          b.sprite.material.dispose()
+          b.halo.material.dispose()
+          b.onArrive?.()
+        }
+      }
 
       // Shells: a bright core and a fading streak, a thread of smoke behind
       for (let i = shells.length - 1; i >= 0; i--) {

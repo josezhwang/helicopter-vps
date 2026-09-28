@@ -66,6 +66,7 @@ export function Game({ roomId, token }: { roomId: string; token: string }) {
       onBoom: (at, kind, by) => game?.blast(at, kind, by),
       onVehicleHp: (id, hp, max) => game?.vehicleHpChanged(id, hp, max),
       onBarrel: (id, alive) => game?.barrelChanged(id, alive),
+      onShip: (team, hp, wrecked, by) => game?.shipChanged(team, hp, wrecked, by),
       onError: (message) => setError(message),
       onConnection: (connected) => setGameState({ connected }),
     })

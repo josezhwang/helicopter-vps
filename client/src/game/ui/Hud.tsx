@@ -68,6 +68,24 @@ function DamageArrow({ angle }: { angle: number }) {
   )
 }
 
+/** The two capital ships' hulls (they can be shot down). */
+function ShipBars({ ships }: { ships: GameState['ships'] }) {
+  return (
+    <div style={{ ...panel, padding: '6px 10px', fontSize: 12, width: 210 }}>
+      <div style={{ color: '#9fb4c8', letterSpacing: 1, marginBottom: 3 }}>CAPITAL SHIPS</div>
+      {(['blue', 'red'] as const).map((team) => (
+        <div key={team} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 34, color: TEAM_CSS[team], fontWeight: 700 }}>{team.toUpperCase()}</span>
+          <div style={{ flex: 1, height: 6, background: 'rgba(255, 255, 255, 0.14)', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{ width: `${Math.round(ships[team] * 100)}%`, height: '100%', background: ships[team] > 0 ? TEAM_CSS[team] : '#444', transition: 'width 200ms linear' }} />
+          </div>
+          <span style={{ width: 44, textAlign: 'right', color: ships[team] > 0 ? '#dfe8f0' : '#ff8a6a' }}>{ships[team] > 0 ? `${Math.round(ships[team] * 100)}%` : 'WRECK'}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function KillFeed({ entries }: { entries: KillEntry[] }) {
   if (!entries.length) return null
   const name = (text: string, team: KillEntry['killerTeam']) => <span style={{ color: team ? TEAM_CSS[team] : '#e8f0f8', fontWeight: 700 }}>{text}</span>
@@ -201,7 +219,7 @@ function LockOn({ state }: { state: GameState }) {
 }
 
 function controlsHint(state: GameState) {
-  if (state.onGun) return 'MACHINE GUN — mouse aim · LMB fire (slow, heavy rounds) · E leave the gun'
+  if (state.onGun) return state.cannon >= 0 ? 'SHIP COMMAND — mouse aims the main cannon · LMB fire · E leave the bridge' : 'PULSE CANNON — mouse aim · LMB fire (heavy plasma bolts that burst: aircraft and tanks) · E leave the gun'
   if (state.vehicle === 'heli') {
     return state.seat === 0
       ? 'GUNSHIP PILOT — SPACE lift fans · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · mouse aim · LMB machine gun · RMB missiles · V view · E exit'
@@ -255,6 +273,7 @@ export function Hud() {
       <Minimap />
       <div style={{ position: 'absolute', right: 16, top: 16, display: 'grid', justifyItems: 'end', gap: 10 }}>
         <Roster players={state.players} />
+        <ShipBars ships={state.ships} />
         <KillFeed entries={state.killFeed} />
       </div>
 
@@ -291,7 +310,7 @@ export function Hud() {
         </div>
         {state.vehicle && <Bar label={state.vehicle === 'heli' || state.vehicle === 'fighter' ? 'AIRFRAME' : 'HULL'} value={state.vehicleHp} color={state.vehicleHp > 0.5 ? '#8fd0ff' : state.vehicleHp > 0.25 ? '#f4c95d' : '#ef6b66'} />}
         {state.onGun ? (
-          <div style={{ fontSize: 18, color: '#ffb35a' }}>MACHINE GUN</div>
+          <div style={{ fontSize: 18, color: state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>{state.cannon >= 0 ? `SHIP'S MAIN CANNON · ${state.cannon >= 1 ? 'READY' : `LOADING ${Math.round(state.cannon * 100)}%`}` : 'PULSE CANNON'}</div>
         ) : state.carGun ? (
           <div style={{ fontSize: 18, color: (state.vehicle === 'heli' || state.vehicle === 'fighter') && state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
             {state.vehicle === 'fighter' ? `LASERS · ${state.cannon >= 1 ? (state.lock >= 1 ? 'MISSILE LOCKED' : 'MISSILE READY') : `MISSILE RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : state.vehicle === 'heli' ? `BALL TURRET · ${state.cannon >= 1 ? 'MISSILES READY' : `MISSILES RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : 'ROOF GATLING'}
