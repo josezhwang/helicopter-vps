@@ -37,6 +37,8 @@ input:focus, select:focus { border-color: #4d8f75; box-shadow: 0 0 0 3px rgba(77
 .button.primary:hover { background: #276654; }
 .button.outline { color: #286653; border-color: #9ab9a8; background: transparent; }
 .button.outline:hover { background: #e3eee5; }
+.button.outline.discord-invite { color: #4752c4; border-color: #8f98ea; }
+.button.outline.discord-invite:hover { background: #eceefd; }
 .text-button { border: 0; padding: 0; color: inherit; background: transparent; font-size: inherit; }
 .text-button:hover { color: #1f7058; }
 .text-button.accent { color: #236b55; font-weight: 800; }

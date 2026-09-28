@@ -17,7 +17,7 @@ const OUTPOST_KIT: Array<{ prop: 'jersey' | 'crate' | 'jerrycan' | 'generator'; 
   { prop: 'jersey', x: -2.3, z: -3.7, yaw: 0.08 },
   { prop: 'jersey', x: 1.4, z: -4.0, yaw: -0.18 },
   { prop: 'crate', x: -1.7, z: 0.5, yaw: 0.25 },
-  { prop: 'crate', x: -1.68, z: 0.52, yaw: 0.1, y: 0.265 },
+  { prop: 'crate', x: -1.68, z: 0.52, yaw: 0.1, y: 0.7 },
   { prop: 'crate', x: 0.9, z: 1.5, yaw: -0.5 },
   { prop: 'jerrycan', x: -3.9, z: -0.25, yaw: 1.2 },
   { prop: 'jerrycan', x: -3.55, z: 0.15, yaw: 0.85 },
@@ -25,7 +25,7 @@ const OUTPOST_KIT: Array<{ prop: 'jersey' | 'crate' | 'jerrycan' | 'generator'; 
 ]
 /** Solid size of each kind (width along its length, height, depth) — the jerrycans are kicked about. */
 const KIT_SOLID: Partial<Record<'jersey' | 'crate' | 'jerrycan' | 'generator', [number, number, number]>> = {
-  jersey: [1.57, 1.11, 0.5], crate: [0.8, 0.53, 0.46], generator: [0.82, 0.58, 0.56],
+  jersey: [1.57, 1.11, 0.5], crate: [0.8, 0.7, 0.8], generator: [0.82, 0.46, 0.56],
 }
 /** Keep trees, rocks and grass off the outposts. */
 export const OUTPOST_CLEARANCE = 10

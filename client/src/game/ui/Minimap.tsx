@@ -115,6 +115,9 @@ function drawBlip(ctx: CanvasRenderingContext2D, blip: RadarBlip, sx: number, sy
         ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
         ctx.strokeStyle = ctx.fillStyle
         ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.moveTo(0, -7); ctx.lineTo(0, 7); ctx.stroke()
+      } else if (blip.kind === 'fighter') {
+        // A dart: swept wings
+        ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(6, 5); ctx.lineTo(0, 2.5); ctx.lineTo(-6, 5); ctx.closePath(); ctx.fill(); ctx.stroke()
       } else if (blip.kind === 'mech') {
         // A walker: a body with two legs
         ctx.beginPath(); ctx.arc(0, -1.5, 4.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke()

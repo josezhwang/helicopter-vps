@@ -92,9 +92,10 @@ vec2 across = vec2(-facing.y, facing.x) * aShape.y * width * (1.0 - t * 0.85);
 bladePos.xz += across + bend;
 bladePos.y += t * height * (1.0 - 0.25 * length(bend) / max(height, 1e-3));
 vBladeT = t;
-// Colour per blade: dark roots, sunlit tips, some drier yellow-green ones
-vec3 tipColor = mix(vec3(0.16, 0.27, 0.05), vec3(0.3, 0.3, 0.1), step(0.84, bHash(root * 3.1)) * 0.8);
-vBladeColor = mix(vec3(0.028, 0.055, 0.012), tipColor * (0.8 + aBlade.w * 0.4), t);
+// Colour per blade (alien meadow): deep teal roots, sea-green tips, some violet and some amber-lime fronds
+float kind = bHash(root * 3.1);
+vec3 tipColor = kind > 0.9 ? vec3(0.3, 0.13, 0.36) : kind > 0.8 ? vec3(0.34, 0.36, 0.06) : vec3(0.07, 0.3, 0.24);
+vBladeColor = mix(vec3(0.012, 0.045, 0.045), tipColor * (0.8 + aBlade.w * 0.4), t);
 // Lit mostly like the ground it grows from (soft, no harsh blade-edge shading)
 vec3 objectNormal = normalize(vec3(facing.x * 0.35, 1.0, facing.y * 0.35));
 #ifdef USE_TANGENT
@@ -106,9 +107,9 @@ vec3 objectNormal = normalize(vec3(facing.x * 0.35, 1.0, facing.y * 0.35));
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = normalize(vNormal);\nnonPerturbedNormal = normal;')
       .replace('#include <map_fragment>', /* glsl */ `diffuseColor.rgb = vBladeColor;
 // Light shining through the blade tips from behind
-totalEmissiveRadiance += vBladeColor * vec3(0.18, 0.2, 0.06) * vBladeT;`)
+totalEmissiveRadiance += vBladeColor * vec3(0.2, 0.26, 0.24) * vBladeT * vBladeT;`)
   }
-  material.customProgramCacheKey = () => 'aerium-grass-blades-v1'
+  material.customProgramCacheKey = () => 'aerium-grass-blades-v2'
   const mesh = new THREE.Mesh(geometry, material)
   mesh.frustumCulled = false
   mesh.receiveShadow = true

@@ -36,7 +36,7 @@ export interface GameState {
   weapons: WeaponKind[]
   current: WeaponKind | null
   /** What we are flying/driving, if anything, and in which seat (0 = pilot / driver). */
-  vehicle: 'heli' | 'car' | 'tank' | 'mech' | null
+  vehicle: 'heli' | 'car' | 'tank' | 'mech' | 'fighter' | null
   /** Our vehicle's hull strength, 0..1. */
   vehicleHp: number
   /** Tank cannon: 0..1 loaded (1 = ready), -1 when not driving a tank. */
@@ -74,6 +74,9 @@ export interface GameState {
   message: string
   /** Rotor RPM while piloting (0–1000, viewer-style x10 readout). */
   rotorRpm: number
+  /** Flying a fighter: height above the ground (m), and whether the boost is lit. */
+  altitude: number
+  boost: boolean
   /** Car speed while driving, km/h. */
   speedKmh: number
   /** Player health — starts at 100. */
@@ -104,7 +107,7 @@ type Listener = (s: GameState) => void
 export interface RadarBlip {
   x: number
   z: number
-  kind: 'mate' | 'enemy' | 'heli' | 'car' | 'tank' | 'mech' | 'gem' | 'barrel'
+  kind: 'mate' | 'enemy' | 'heli' | 'car' | 'tank' | 'mech' | 'fighter' | 'gem' | 'barrel'
   team: Team | null
   /** Heading (world, 0 = +Z) for players and vehicles. */
   yaw: number
@@ -150,13 +153,15 @@ const INITIAL_STATE: GameState = {
   carryingGem: false,
   score: 0,
   rotorRpm: 0,
+  altitude: 0,
+  boost: false,
   speedKmh: 0,
   health: 100,
   shield: 100,
   shieldHits: 0,
   announcement: '',
   announceId: 0,
-  weaponName: 'Primary Gun',
+  weaponName: 'AR-H470 Pulse Rifle',
   finished: false,
   message: 'Connecting to the battle…',
   team: null,

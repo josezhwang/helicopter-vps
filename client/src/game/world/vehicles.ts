@@ -4,7 +4,7 @@ import { loadModel, toStandardMaterial } from './assets'
 import { heightAt } from './terrain'
 import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
 import { createMechRig, type MechRig } from './mechs'
-import { trackLoad } from './loading'
+import { createFighterRig, fighterSpec, type FighterRig } from './fighters'
 
 /**
  * Each team's motor pool: FLEET_SIZE helicopters on the base's landing area and FLEET_SIZE battle cars parked
@@ -12,104 +12,123 @@ import { trackLoad } from './loading'
  * handful of draw calls for all 20); the per-vehicle `object` only carries the pose and invisible hitboxes.
  */
 
-export type VehicleKind = 'heli' | 'car' | 'tank' | 'mech'
+export type VehicleKind = 'heli' | 'car' | 'tank' | 'mech' | 'fighter'
 export const FLEET_SIZE = 5
 /** Rotor speed ceiling (the HUD shows it x10). */
 export const MAX_ROTOR_RPM = 100
 /** Seats per vehicle: a helicopter has pilot, co-pilot and two rear seats; a car just its driver. */
-export const SEATS: Record<VehicleKind, number> = { heli: 4, car: 1, tank: 1, mech: 1 }
+export const SEATS: Record<VehicleKind, number> = { heli: 4, car: 1, tank: 1, mech: 1, fighter: 1 }
 /** Hull strength per kind (the server's copy decides; this is for the HUD before the first report). */
-export const VEHICLE_MAX_HP: Record<VehicleKind, number> = { heli: 450, car: 700, tank: 2000, mech: 1600 }
+export const VEHICLE_MAX_HP: Record<VehicleKind, number> = { heli: 450, car: 700, tank: 2000, mech: 1600, fighter: 380 }
 export const TANKS_PER_BASE = 2
 
-const HELI_URL = '/models/heli_hind.glb'
-const CAR_URL = '/models/battle_car.glb'
-const CAR_FAR_URL = '/models/battle_car_far.glb'
-const WHEEL_URL = '/models/battle_car_wheel.glb'
-const WHEEL_FAR_URL = '/models/battle_car_wheel_far.glb'
+/** The gunship's parts: hull, canopy glass, nose ball turret, and one lift-fan rotor (four copies spin). */
+const DROP_BODY_URL = '/models/drop_body.glb'
+const DROP_GLASS_URL = '/models/drop_glass.glb'
+const DROP_GUN_URL = '/models/drop_gun.glb'
+const DROP_FAN_URL = '/models/drop_fans.glb'
+/** The assault buggy: body, one wheel (four copies turn), and a distant version with its wheels fused on. */
+const CAR_URL = '/models/buggy_body.glb'
+const CAR_FAR_URL = '/models/buggy_body_far.glb'
+const WHEEL_URL = '/models/buggy_wheel.glb'
 const TURRET_URL = '/models/battle_car_turret.glb'
 const GATLING_URL = '/models/battle_car_gatling.glb'
 const TANK_HULL_URL = '/models/tank_hull.glb'
 const TANK_TURRET_URL = '/models/tank_turret.glb'
 const TANK_GUN_URL = '/models/tank_gun.glb'
-/** The tank's tracks (one link model, laid round each loop) and road wheels, and where they sit. */
-const TANK_RUNNING_URL = '/models/tank_running.glb'
-const TANK_RUNNING_JSON = '/models/tank_running.json'
+/** One of the tank's tread rollers (16 of them turn in its four track pods). */
+const TANK_TREAD_URL = '/models/tank_tread.glb'
 
 /**
- * The attack helicopter ("Hind Attack Helicopter" by Ashley Aslett, CC-BY 4.0, markings removed). Measured at
- * full size (metres, nose +Z, origin on the ground under the rotor hub); the game flies it at HELI_SCALE so five
- * of them fit on a base's landing row: 13.7 m long, 13.7 m rotor.
+ * The gunship ("Heavy VTOL gunship" by Kai Xiang, CC-BY 4.0), measured at full size (metres, nose +Z, origin on
+ * the ground under the middle) and flown at HELI_SCALE so five fit on a base's landing row: 12.6 m long, 13 m
+ * across the fans. It lifts on four ducted fans and carries a ball turret under the nose.
  */
-const HELI_SCALE = 0.78
-const HIND = {
-  rotorHub: [0, 4.148, 0], rotorAxis: [0, 0.999836, 0.018083],
-  tailHub: [0.498, 3.673, -10.338], tailAxis: [1, 0, 0],
-  gunPivot: [0.003, 0.838, 5.647], gunMuzzle: [0.004, 0.832, 6.642],
-  cabin: { min: [-0.951, 0.539, -3.185], max: [0.951, 3.646, 5.945] },
-  boom: { min: [-0.608, 0.98, -11.4], max: [0.608, 2.989, -3.185] },
+const HELI_SCALE = 0.72
+const DROP = {
+  fans: [[7.7005, 2.9286, -3.6009], [-7.7005, 2.9286, -3.6009], [3.3044, 2.7003, 4.5327], [-3.3044, 2.7003, 4.5327]],
+  gunPivot: [-0.0021, 1.3418, 5.8152], gunMuzzle: [0, 1.4028, 8.6647],
+  cabin: { min: [-2.4, 0.9, -3.0], max: [2.4, 4.3, 8.75] },
+  boom: { min: [-2.9, 0.9, -8.75], max: [2.9, 4.0, -3.0] },
 } as const
 const hind = (v: readonly number[]) => new THREE.Vector3(v[0], v[1], v[2]).multiplyScalar(HELI_SCALE)
-/** The nose gun (the gunner's): turns about HELI_GUN_PIVOT, this far to either side and up / down (radians). */
-export const HELI_GUN_PIVOT = hind(HIND.gunPivot)
-const HELI_GUN_MUZZLE = hind(HIND.gunMuzzle)
+/** The nose gun (the pilot's): turns about HELI_GUN_PIVOT, this far to either side and up / down (radians). */
+export const HELI_GUN_PIVOT = hind(DROP.gunPivot)
+const HELI_GUN_MUZZLE = hind(DROP.gunMuzzle)
+/** The missile pods under the wings (gunship space). */
+export const HELI_PODS = [hind([3.6, 2.55, -0.2]), hind([-3.6, 2.55, -0.2])]
 export const HELI_GUN_LIMITS = { yaw: 1.9, up: 0.2, down: 0.95 }
-/** Battle car model units → metres: about 6.1m long, 3.6m wide. */
-const CAR_SCALE = 0.85
 /**
- * Wheel hubs in car model units (the car was exported centred on its footprint, ground at y = 0), with the
- * rear wheels' slightly larger size and the side they're on. The wheel model is the left front one.
+ * The assault buggy ("Hyena Recon Transport" by Michael Wright, CC-BY 4.0, cut down to four wheels): metres, nose
+ * +Z, ground at y = 0, 5.6 m long. Wheel hubs with the side they're on (+X is the buggy's left); the wheel model
+ * is the left front one.
  */
+const CAR_SCALE = 1
 const WHEELS: Array<{ x: number; y: number; z: number; size: number; right: boolean; front: boolean }> = [
-  { x: -1.3669, y: 0.7978, z: 1.8339, size: 1, right: false, front: true },
-  { x: 1.367, y: 0.7978, z: 1.8339, size: 1, right: true, front: true },
-  { x: -1.3258, y: 0.8138, z: -2.2941, size: 1.02, right: false, front: false },
-  { x: 1.3258, y: 0.8138, z: -2.2941, size: 1.02, right: true, front: false },
+  { x: 1.2821, y: 0.3823, z: 1.5181, size: 1, right: false, front: true },
+  { x: -1.2821, y: 0.3823, z: 1.5181, size: 1, right: true, front: true },
+  { x: 1.3972, y: 0.3823, z: -1.8192, size: 1, right: false, front: false },
+  { x: -1.3972, y: 0.3823, z: -1.8192, size: 1, right: true, front: false },
 ]
-export const CAR_WHEEL_RADIUS = 0.79 * CAR_SCALE
+export const CAR_WHEEL_RADIUS = 0.3823
 /** Distance between front and rear axles, and between left and right wheels, in metres. */
-export const CAR_WHEELBASE = (1.8339 + 2.2941) * CAR_SCALE
-export const CAR_TRACK = 2.7 * CAR_SCALE
-/** Along the car's length, two circles of this radius stand in for its footprint in collisions. */
-export const CAR_CIRCLE_RADIUS = 1.85
-export const CAR_CIRCLE_OFFSET = 1.45
-export const HELI_BODY_RADIUS = 3
+export const CAR_WHEELBASE = 1.5181 + 1.8192
+export const CAR_TRACK = 2.68
+/** Along the buggy's length, two circles of this radius stand in for its footprint in collisions. */
+export const CAR_CIRCLE_RADIUS = 1.55
+export const CAR_CIRCLE_OFFSET = 1.3
+export const HELI_BODY_RADIUS = 4.2
 /**
- * The car's roof gun (metres, car space): the dome turns about a vertical axis through YAW_PIVOT, the gatling
- * tilts about GATLING_PIVOT (on its own axis, which it also spins around), muzzle at GATLING_MUZZLE.
+ * The buggy's gatling turret on its rear deck (metres, buggy space): the dome turns about a vertical axis through
+ * TURRET_PIVOT, the gatling tilts about GATLING_PIVOT (on its own axis, which it also spins around), muzzle at
+ * GATLING_MUZZLE. The turret models are in the old battle car's units: GUN_SCALE, then moved by GUN_OFFSET.
  */
-export const TURRET_PIVOT = new THREE.Vector3(0, 0, -1.5925 * CAR_SCALE)
-export const GATLING_PIVOT = new THREE.Vector3(0, 3.892 * CAR_SCALE, -0.473 * CAR_SCALE)
-const GATLING_MUZZLE = new THREE.Vector3(0, 3.892 * CAR_SCALE, 1.239 * CAR_SCALE)
+const GUN_SCALE = 0.85
+const GUN_OFFSET = new THREE.Vector3(0, -1.854, -0.296)
+export const TURRET_PIVOT = new THREE.Vector3(0, 0, -1.65)
+export const GATLING_PIVOT = new THREE.Vector3(0, 3.892 * GUN_SCALE, -0.473 * GUN_SCALE).add(GUN_OFFSET)
+const GATLING_MUZZLE = new THREE.Vector3(0, 3.892 * GUN_SCALE, 1.239 * GUN_SCALE).add(GUN_OFFSET)
 /** How high / low the gatling can point (radians). */
 export const CAR_GUN_PITCH = { up: 0.55, down: 0.18 }
 /**
- * The tank (metres, tank space, nose +Z, origin under the middle of the hull): the turret turns about the
- * vertical axis through TANK_TURRET_PIVOT, the gun tilts about TANK_GUN_PIVOT (on its trunnions), the muzzle is
- * at TANK_MUZZLE. The hull's footprint is two circles along it.
+ * The tank ("Electro Tank" by Panther5, CC-BY 4.0), drawn at TANK_SCALE (metres, tank space, nose +Z, origin on
+ * the ground under the hull): a hover-tread hull on four track pods, a rear-mounted turret turning about the
+ * vertical axis through TANK_TURRET_PIVOT, the twin coil-rail gun tilting about TANK_GUN_PIVOT, the muzzle at
+ * TANK_MUZZLE. Its footprint is two circles along it.
  */
-export const TANK_TURRET_PIVOT = new THREE.Vector3(0, 0, 0.63)
-export const TANK_GUN_PIVOT = new THREE.Vector3(0.054, 2.184, 2.53)
-const TANK_MUZZLE = new THREE.Vector3(0.054, 2.184, 8.46)
+const TANK_SCALE = 0.85
+const tank = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).multiplyScalar(TANK_SCALE)
+export const TANK_TURRET_PIVOT = tank(0.0369, 1.7652, -1.9561)
+export const TANK_GUN_PIVOT = tank(0.0634, 2.6312, -1.7961)
+/** The rails rest tilted up in the model: the game levels them, so pitch 0 points straight ahead. */
+const TANK_GUN_REST = Math.atan2(0.7368, 3.4546)
+const TANK_MUZZLE = TANK_GUN_PIVOT.clone().add(tank(0, 0, Math.hypot(0.7368, 3.4546)))
+/** The gunner's sight, relative to the turret pivot (it turns with the turret). */
+export const TANK_SIGHT = tank(0.45, 1.388, 0.9)
 export const TANK_GUN_PITCH = { up: 0.3, down: 0.12 }
-export const TANK_CIRCLE_RADIUS = 2.15
-export const TANK_CIRCLE_OFFSET = 2.35
-export const TANK_LENGTH = 9.1
-export const TANK_WIDTH = 4.2
+export const TANK_CIRCLE_RADIUS = 3.1
+export const TANK_CIRCLE_OFFSET = 1.4
+export const TANK_LENGTH = 7.5 * TANK_SCALE
+export const TANK_WIDTH = 8.24 * TANK_SCALE
+/** The tread rollers (tank space; +X is the tank's left) and their radius. */
+const TANK_ROLLERS = [
+  ...[3.0129, 2.4174, 1.8219, 1.2264].flatMap((z) => [{ x: 2.0268, z, side: 'left' as const }, { x: -2.087, z, side: 'right' as const }]),
+  ...[-0.8289, -1.4244, -2.0199, -2.6154].flatMap((z) => [{ x: 3.3896, z, side: 'left' as const }, { x: -3.3896, z, side: 'right' as const }]),
+].map((r) => ({ center: tank(r.x, 0.4749, r.z), side: r.side }))
+const TANK_ROLLER_RADIUS = 0.3769 * TANK_SCALE
 /** The mech stands on a circle this big; it counts as airborne this far above the ground. */
 export const MECH_RADIUS = 2.4
 export const MECH_AIRBORNE = 0.6
 
 /**
- * Helicopter seats (eye positions on the full-size model): the pilot in the raised rear cockpit, the gunner in
- * the nose (he works the nose gun), and two troopers at the cabin doors, leaning out to shoot. Seat i gets in
- * from the side its `outside` spot is on (x, z; standing eye height).
+ * Gunship seats (eye positions on the full-size model): the pilot and co-pilot in the tandem cockpit, and two
+ * troopers leaning out of the cabin sides to shoot. Seat i gets in from its `outside` spot (x, z; standing).
  */
 const HELI_SEATS_MODEL: Array<{ eye: THREE.Vector3Tuple; outside: [number, number] }> = [
-  { eye: [0, 2.4, 3.62], outside: [2.2, 3.4] },
-  { eye: [0, 1.88, 4.85], outside: [-2.2, 4.6] },
-  { eye: [1.12, 1.95, 1.32], outside: [2.2, 1.32] },
-  { eye: [-1.12, 1.95, 1.32], outside: [-2.2, 1.32] },
+  { eye: [0, 3.95, 5.6], outside: [2.6, 5.6] },
+  { eye: [0, 3.75, 7.0], outside: [-2.6, 7.0] },
+  { eye: [2.45, 2.55, -1.0], outside: [3.6, -1.0] },
+  { eye: [-2.45, 2.55, -1.0], outside: [-3.6, -1.0] },
 ]
 /** How long a door stays open while someone climbs in or out (ms). */
 export const DOOR_HOLD_MS = 1600
@@ -198,6 +217,9 @@ export interface Fleet {
   mech: (v: Vehicle) => MechRig | null
 }
 
+/** A fighter counts as landed this close to the ground (and this slow). */
+export const FIGHTER_LANDED = 0.6
+
 interface Spot { kind: VehicleKind; team: Team; index: number; x: number; z: number; yaw: number }
 
 function fleetSpots(team: Team): Spot[] {
@@ -210,6 +232,7 @@ function fleetSpots(team: Team): Spot[] {
   }
   LAYOUT.tanks.forEach(([x, z], i) => spots.push({ kind: 'tank', team, index: i, ...baseToWorld(team, x, z), yaw: baseYaw(team, LAYOUT.tankYaw) }))
   LAYOUT.mechs.forEach(([x, z], i) => spots.push({ kind: 'mech', team, index: i, ...baseToWorld(team, x, z), yaw: baseYaw(team, LAYOUT.mechYaw) }))
+  LAYOUT.fighters.forEach(([x, z], i) => spots.push({ kind: 'fighter', team, index: i, ...baseToWorld(team, x, z), yaw: baseYaw(team, LAYOUT.fighterYaw) }))
   return spots
 }
 
@@ -285,7 +308,7 @@ export function createFleet(): Fleet {
     hitbox.userData.vehicleId = id
     // Placeholder shapes until the model loads and the boxes are fitted to it
     const box = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hitMaterial)
-    if (spot.kind === 'heli') { box.scale.set(2.4, 2.8, 5.5); box.position.set(0, 1.9, 1) } else if (spot.kind === 'car') { box.scale.set(3.6, 2.8, 6.1); box.position.set(0, 1.9, 0) } else if (spot.kind === 'mech') { box.scale.set(4.4, 3.0, 3.2); box.position.set(0, 5.7, 0.1) } else { box.scale.set(4.2, 2.0, 9.1); box.position.set(0, 1.1, 0) }
+    if (spot.kind === 'fighter') { const f = fighterSpec(spot.team); box.scale.subVectors(f.body.max, f.body.min); box.position.addVectors(f.body.min, f.body.max).multiplyScalar(0.5) } else if (spot.kind === 'heli') { box.scale.set(2.4, 2.8, 5.5); box.position.set(0, 1.9, 1) } else if (spot.kind === 'car') { box.scale.set(3.6, 2.8, 6.1); box.position.set(0, 1.9, 0) } else if (spot.kind === 'mech') { box.scale.set(4.4, 3.0, 3.2); box.position.set(0, 5.7, 0.1) } else { box.scale.set(8.24 * TANK_SCALE, 2.3 * TANK_SCALE, 7.5 * TANK_SCALE); box.position.set(0, 1.15 * TANK_SCALE, 0) }
     hitbox.add(box)
     if (spot.kind === 'mech') {
       // The legs under the torso
@@ -294,11 +317,19 @@ export function createFleet(): Fleet {
       legs.position.set(0, 2.15, 0)
       hitbox.add(legs)
     }
+    if (spot.kind === 'fighter') {
+      const wings = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hitMaterial)
+      const f = fighterSpec(spot.team)
+      wings.scale.subVectors(f.wings.max, f.wings.min)
+      wings.position.addVectors(f.wings.min, f.wings.max).multiplyScalar(0.5)
+      hitbox.add(wings)
+    }
     if (spot.kind === 'tank') {
       // The turret on top (round enough that one box covers it whichever way it faces)
       const turret = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hitMaterial)
-      turret.scale.set(3.3, 1.35, 3.3)
-      turret.position.set(0.1, 2.55, 0.63)
+      // (round enough that one box covers it whichever way it faces)
+      turret.scale.set(2.8 * TANK_SCALE, 1.3 * TANK_SCALE, 2.8 * TANK_SCALE)
+      turret.position.set(TANK_TURRET_PIVOT.x, 2.4 * TANK_SCALE, TANK_TURRET_PIVOT.z)
       hitbox.add(turret)
     }
     object.add(hitbox)
@@ -320,7 +351,7 @@ export function createFleet(): Fleet {
   // Helicopters stand on the base's level concrete; cars on the ground outside
   const restHeight = (_v: Vehicle, x: number, z: number) => heightAt(x, z) + 0.02
 
-  const clearance = (x: number, z: number, margin = 0) => spots.some((s) => Math.hypot(s.x - x, s.z - z) < (s.kind === 'heli' ? 8 : s.kind === 'tank' || s.kind === 'mech' ? 6 : 5) + margin)
+  const clearance = (x: number, z: number, margin = 0) => spots.some((s) => Math.hypot(s.x - x, s.z - z) < (s.kind === 'heli' || s.kind === 'fighter' ? 8 : s.kind === 'tank' || s.kind === 'mech' ? 6 : 5) + margin)
 
   const circles = (skip?: Vehicle | null) => {
     const out: Array<{ x: number; z: number; r: number }> = []
@@ -335,6 +366,10 @@ export function createFleet(): Fleet {
         // A mech up on its jets doesn't block the ground
         if (p.y - heightAt(p.x, p.z) > 3) continue
         out.push({ x: p.x, z: p.z, r: MECH_RADIUS })
+      } else if (v.kind === 'fighter') {
+        if (p.y - heightAt(p.x, p.z) > 3) continue
+        const fx = Math.sin(v.object.rotation.y) * 2.2, fz = Math.cos(v.object.rotation.y) * 2.2
+        out.push({ x: p.x + fx, z: p.z + fz, r: 2.2 }, { x: p.x - fx, z: p.z - fz, r: 2.6 })
       } else {
         const tank = v.kind === 'tank'
         const offset = tank ? TANK_CIRCLE_OFFSET : CAR_CIRCLE_OFFSET, r = tank ? TANK_CIRCLE_RADIUS : CAR_CIRCLE_RADIUS
@@ -358,14 +393,13 @@ export function createFleet(): Fleet {
 
   // ---- Rendering (filled in once the models load) ----
   interface HeliModel {
-    statics: THREE.InstancedMesh[]; glass: THREE.InstancedMesh[]; rotor: THREE.InstancedMesh[]; tail: THREE.InstancedMesh[]; gun: THREE.InstancedMesh[]
-    rotorHub: THREE.Vector3; rotorAxis: THREE.Vector3; tailHub: THREE.Vector3; tailAxis: THREE.Vector3
+    statics: THREE.InstancedMesh[]; glass: THREE.InstancedMesh[]; fans: THREE.InstancedMesh[]; gun: THREE.InstancedMesh[]
   }
   interface CarLevel { body: THREE.InstancedMesh[]; wheels: THREE.InstancedMesh[] }
   let carGun: { turret: THREE.InstancedMesh[]; gatling: THREE.InstancedMesh[] } | null = null
   let tankModel: { hull: THREE.InstancedMesh[]; turret: THREE.InstancedMesh[]; gun: THREE.InstancedMesh[] } | null = null
   /** Plain (not drawn) meshes of each vehicle kind's body, to find where rounds meet it. */
-  const surfaces: Record<VehicleKind, THREE.Mesh[]> = { heli: [], car: [], tank: [], mech: [] }
+  const surfaces: Record<VehicleKind, THREE.Mesh[]> = { heli: [], car: [], tank: [], mech: [], fighter: [] }
   const surfaceMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
   let heliModel: HeliModel | null = null
   let carNear: CarLevel | null = null
@@ -383,6 +417,14 @@ export function createFleet(): Fleet {
     mechTrack.set(v, { y: v.object.position.y, rising: false, yaw: v.object.rotation.y, turn: 0 })
     group.add(rig.object)
   }
+  // Fighters too (a handful, each its own model)
+  const fighterRigs = new Map<Vehicle, FighterRig>()
+  for (const v of vehicles) {
+    if (v.kind !== 'fighter') continue
+    const rig = createFighterRig(v.team)
+    fighterRigs.set(v, rig)
+    group.add(rig.object)
+  }
   const heliSeats: HeliSeat[] = HELI_SEATS_MODEL.map(({ eye, outside }) => ({
     eye: hind(eye),
     outside: new THREE.Vector3(outside[0] * HELI_SCALE, 1.7, outside[1] * HELI_SCALE),
@@ -391,7 +433,7 @@ export function createFleet(): Fleet {
   for (const v of vehicles) {
     if (v.kind !== 'heli') continue
     v.hitbox.clear()
-    for (const box of [HIND.cabin, HIND.boom]) {
+    for (const box of [DROP.cabin, DROP.boom]) {
       const min = hind(box.min), max = hind(box.max)
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hitMaterial)
       mesh.scale.subVectors(max, min)
@@ -400,62 +442,35 @@ export function createFleet(): Fleet {
     }
   }
 
-  void (async () => {
-    const gltf = await loadModel(HELI_URL)
-    const root = gltf.scene
-    root.updateMatrixWorld(true)
-    const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert()
-    const place = new THREE.Matrix4().makeScale(HELI_SCALE, HELI_SCALE, HELI_SCALE)
-    type Part = 'static' | 'glass' | 'rotor' | 'tail' | 'gun'
-    const partOf = (node: THREE.Object3D): Part => {
-      for (let n: THREE.Object3D | null = node; n; n = n.parent) if (n.name === 'rotor' || n.name === 'tail' || n.name === 'gun' || n.name === 'glass') return n.name
-      return 'static'
-    }
-    const byPart: Record<Part, Map<THREE.Material, THREE.BufferGeometry[]>> = { static: new Map(), glass: new Map(), rotor: new Map(), tail: new Map(), gun: new Map() }
-    root.traverse((node) => {
-      const mesh = node as THREE.Mesh
-      if (!mesh.isMesh || Array.isArray(mesh.material)) return
-      const geometry = mesh.geometry.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(place, toRoot.clone().multiply(mesh.matrixWorld)))
-      for (const name of Object.keys(geometry.attributes)) if (!['position', 'normal', 'uv'].includes(name)) geometry.deleteAttribute(name)
-      if (!geometry.index) geometry.setIndex([...Array(geometry.attributes.position.count).keys()])
-      if (!geometry.attributes.normal) geometry.computeVertexNormals()
-      if (!geometry.attributes.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(geometry.attributes.position.count * 2), 2))
-      const map = byPart[partOf(mesh)]
-      if (!map.has(mesh.material)) map.set(mesh.material, [])
-      map.get(mesh.material)!.push(geometry)
-    })
-    const pieces = (part: Part): Piece[] => [...byPart[part]].flatMap(([source, list]) => {
-      const geometry = list.length === 1 ? list[0] : mergeGeometries(list)
-      if (!geometry) return []
-      const material = toStandardMaterial(source)
-      if (material.transparent) {
-        // Canopy glass: one pass, no depth writes (it's drawn after the cockpit it shows)
-        material.depthWrite = false
-        material.forceSinglePass = true
-      }
-      return [{ geometry, material }]
-    })
+  void Promise.all([loadModel(DROP_BODY_URL), loadModel(DROP_GLASS_URL), loadModel(DROP_GUN_URL), loadModel(DROP_FAN_URL)]).then(([body, glass, gun, fan]) => {
     const capacity = helis.length
-    const inst = (list: Piece[], shadows: boolean) => list.map((p) => makeInstanced(p, capacity, shadows, group))
-    const statics = pieces('static')
-    surfaces.heli = statics.filter((p) => !(p.material as THREE.MeshStandardMaterial).transparent).map((p) => new THREE.Mesh(p.geometry, surfaceMaterial))
+    const inst = (list: Piece[], shadows: boolean, count = capacity) => list.map((p) => makeInstanced(p, count, shadows, group))
+    const statics = bakePieces(body.scene, HELI_SCALE)
+    const glassPieces = bakePieces(glass.scene, HELI_SCALE)
+    for (const p of glassPieces) {
+      // Canopy glass: one pass, no depth writes (it's drawn after the cockpit it shows)
+      const material = p.material as THREE.MeshStandardMaterial
+      material.transparent = true
+      material.opacity = Math.min(material.opacity, 0.55)
+      material.depthWrite = false
+      material.forceSinglePass = true
+    }
+    // The gun and fan files are centred on their pivots: move them to the gun pivot / leave the fan at the origin
+    const gunPieces = bakePieces(gun.scene, HELI_SCALE)
+    for (const p of gunPieces) p.geometry.translate(HELI_GUN_PIVOT.x, HELI_GUN_PIVOT.y, HELI_GUN_PIVOT.z)
+    surfaces.heli = statics.map((p) => new THREE.Mesh(p.geometry, surfaceMaterial))
     heliModel = {
       statics: inst(statics, true),
-      glass: inst(pieces('glass'), false),
-      rotor: inst(pieces('rotor'), true),
-      tail: inst(pieces('tail'), false),
-      gun: inst(pieces('gun'), true),
-      rotorHub: hind(HIND.rotorHub),
-      rotorAxis: new THREE.Vector3(...HIND.rotorAxis).normalize(),
-      tailHub: hind(HIND.tailHub),
-      tailAxis: new THREE.Vector3(...HIND.tailAxis),
+      glass: inst(glassPieces, false),
+      fans: inst(bakePieces(fan.scene, HELI_SCALE), false, capacity * DROP.fans.length),
+      gun: inst(gunPieces, true),
     }
-  })().catch((error) => console.error('[vehicles] helicopter model failed to load:', error))
+  }).catch((error) => console.error('[vehicles] gunship model failed to load:', error))
 
-  const loadCar = async (bodyUrl: string, wheelUrl: string, shadows: boolean): Promise<CarLevel> => {
-    const [body, wheel] = await Promise.all([loadModel(bodyUrl), loadModel(wheelUrl)])
+  const loadCar = async (bodyUrl: string, wheelUrl: string | null, shadows: boolean): Promise<CarLevel> => {
+    const [body, wheel] = await Promise.all([loadModel(bodyUrl), wheelUrl ? loadModel(wheelUrl) : null])
     const bodyPieces = bakePieces(body.scene, CAR_SCALE)
-    const wheelPieces = bakePieces(wheel.scene, CAR_SCALE)
+    const wheelPieces = wheel ? bakePieces(wheel.scene, CAR_SCALE) : []
     return {
       body: bodyPieces.map((p) => makeInstanced(p, cars.length, shadows, group)),
       // Wheel shadows are mostly hidden under the body's: 40 wheels aren't worth drawing twice
@@ -475,62 +490,35 @@ export function createFleet(): Fleet {
       box.position.addVectors(bounds.min, bounds.max).multiplyScalar(0.5)
     }
   }).catch((error) => console.error('[vehicles] battle car model failed to load:', error))
-  void loadCar(CAR_FAR_URL, WHEEL_FAR_URL, false).then((level) => { carFar = level })
+  // (the distant buggy's wheels are part of its body)
+  void loadCar(CAR_FAR_URL, null, false).then((level) => { carFar = level })
     .catch((error) => console.warn('[vehicles] distant battle car unavailable, using full detail:', error))
+  const onDeck = (pieces: Piece[]) => { for (const p of pieces) p.geometry.translate(GUN_OFFSET.x, GUN_OFFSET.y, GUN_OFFSET.z); return pieces }
   void Promise.all([loadModel(TURRET_URL), loadModel(GATLING_URL)]).then(([turret, gatling]) => {
     carGun = {
-      turret: bakePieces(turret.scene, CAR_SCALE).map((p) => makeInstanced(p, cars.length, true, group)),
-      gatling: bakePieces(gatling.scene, CAR_SCALE).map((p) => makeInstanced(p, cars.length, true, group)),
+      turret: onDeck(bakePieces(turret.scene, GUN_SCALE)).map((p) => makeInstanced(p, cars.length, true, group)),
+      gatling: onDeck(bakePieces(gatling.scene, GUN_SCALE)).map((p) => makeInstanced(p, cars.length, true, group)),
     }
   }).catch((error) => console.error('[vehicles] battle car gun failed to load:', error))
-  // The tank (Challenger 2 by Tom Zimmermann, CC-BY 4.0): hull with tracks and road wheels, turret, gun — already in tank space
+  // The tank: the turret and gun files are in their own pivots' frames; put them in tank space
   void Promise.all([loadModel(TANK_HULL_URL), loadModel(TANK_TURRET_URL), loadModel(TANK_GUN_URL)]).then(([hull, turret, gun]) => {
-    const hullPieces = bakePieces(hull.scene, 1)
+    const inTankSpace = (pieces: Piece[], pivot: THREE.Vector3) => { for (const p of pieces) p.geometry.translate(pivot.x, pivot.y, pivot.z); return pieces }
+    const hullPieces = bakePieces(hull.scene, TANK_SCALE)
     tankModel = {
       hull: hullPieces.map((p) => makeInstanced(p, tanks.length, true, group)),
-      turret: bakePieces(turret.scene, 1).map((p) => makeInstanced(p, tanks.length, true, group)),
-      gun: bakePieces(gun.scene, 1).map((p) => makeInstanced(p, tanks.length, true, group)),
+      turret: inTankSpace(bakePieces(turret.scene, TANK_SCALE), TANK_TURRET_PIVOT).map((p) => makeInstanced(p, tanks.length, true, group)),
+      gun: inTankSpace(bakePieces(gun.scene, TANK_SCALE).map((p) => { p.geometry.rotateX(TANK_GUN_REST); return p }), TANK_GUN_PIVOT).map((p) => makeInstanced(p, tanks.length, true, group)),
     }
     surfaces.tank = hullPieces.map((p) => new THREE.Mesh(p.geometry, surfaceMaterial))
   }).catch((error) => console.error('[vehicles] tank model failed to load:', error))
 
-  // The tracks and road wheels move: each link slides round its loop towards the next link's place, each wheel
-  // turns on its axle, the two sides separately (a tank turning on the spot runs them in opposite directions)
-  interface Pose { p: THREE.Vector3; q: THREE.Quaternion }
-  interface Running {
-    links: THREE.InstancedMesh[]; loops: Record<'left' | 'right', Pose[]>; pitch: number; step: number
-    wheels: Array<{ meshes: THREE.InstancedMesh[]; spots: Array<{ matrix: THREE.Matrix4; center: THREE.Vector3; radius: number; side: 'left' | 'right' }> }>
-  }
-  let running: Running | null = null
+  // The tread rollers turn with the ground each side covers (a tank turning on the spot runs them in opposite directions)
+  let rollers: THREE.InstancedMesh[] | null = null
   const tracks = new Map<Vehicle, { left: number; right: number; yaw: number }>()
   for (const v of tanks) tracks.set(v, { left: 0, right: 0, yaw: v.object.rotation.y })
-  void Promise.all([loadModel(TANK_RUNNING_URL), trackLoad(TANK_RUNNING_JSON, fetch(TANK_RUNNING_JSON).then((r) => r.json()))]).then(([gltf, layout]) => {
-    const root = gltf.scene
-    root.updateMatrixWorld(true)
-    const piecesOf = (name: string) => {
-      const node = root.getObjectByName(name)
-      return node ? bakePieces(node, 1) : []
-    }
-    const toPose = (m: number[]): Pose => {
-      const matrix = new THREE.Matrix4().fromArray(m)
-      const p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3()
-      matrix.decompose(p, q, sc)
-      return { p, q }
-    }
-    const perTank = layout.links.left.length + layout.links.right.length
-    const wheelGroups = new Map<number, Running['wheels'][number]['spots']>()
-    for (const w of layout.wheels as Array<{ mesh: number; matrix: number[]; center: number[]; radius: number; side: 'left' | 'right' }>) {
-      if (!wheelGroups.has(w.mesh)) wheelGroups.set(w.mesh, [])
-      wheelGroups.get(w.mesh)!.push({ matrix: new THREE.Matrix4().fromArray(w.matrix), center: new THREE.Vector3(...w.center), radius: w.radius, side: w.side })
-    }
-    running = {
-      links: piecesOf('link').map((p) => makeInstanced(p, tanks.length * perTank, false, group)),
-      loops: { left: layout.links.left.map(toPose), right: layout.links.right.map(toPose) },
-      pitch: layout.pitch,
-      step: layout.forward === 1 ? 1 : -1,
-      wheels: [...wheelGroups].map(([mesh, spots]) => ({ meshes: piecesOf(`wheel_${mesh}`).map((p) => makeInstanced(p, tanks.length * spots.length, false, group)), spots })),
-    }
-  }).catch((error) => console.error('[vehicles] tank tracks failed to load:', error))
+  void loadModel(TANK_TREAD_URL).then((gltf) => {
+    rollers = bakePieces(gltf.scene, TANK_SCALE).map((p) => makeInstanced(p, tanks.length * TANK_ROLLERS.length, false, group))
+  }).catch((error) => console.error('[vehicles] tank treads failed to load:', error))
 
   // ---- Per-frame ----
   const m = new THREE.Matrix4(), part = new THREE.Matrix4(), spinM = new THREE.Matrix4(), toHub = new THREE.Matrix4(), fromHub = new THREE.Matrix4()
@@ -572,6 +560,11 @@ export function createFleet(): Fleet {
   }
   const turretM = new THREE.Matrix4(), gatlingM = new THREE.Matrix4()
   const carMuzzle = (v: Vehicle, out: THREE.Vector3) => {
+    if (v.kind === 'fighter') {
+      // The gun that fires next (they take turns)
+      v.object.updateMatrix()
+      return out.copy(fighterSpec(v.team).guns[Math.round(v.gatlingSpin) % 2]).applyMatrix4(v.object.matrix)
+    }
     if (v.kind === 'heli') {
       v.object.updateMatrix()
       return out.copy(HELI_GUN_MUZZLE).applyMatrix4(heliGunMatrix(v, gatlingM)).applyMatrix4(v.object.matrix)
@@ -589,6 +582,11 @@ export function createFleet(): Fleet {
   const gunRay = (v: Vehicle, muzzle: THREE.Vector3, dir: THREE.Vector3) => {
     const rig = mechRigs.get(v)
     if (rig) { rig.gun(muzzle, dir); return }
+    if (v.kind === 'fighter') {
+      carMuzzle(v, muzzle)
+      dir.set(0, 0, 1).applyQuaternion(v.object.quaternion)
+      return
+    }
     if (v.kind === 'heli') {
       carMuzzle(v, muzzle)
       dir.copy(HELI_GUN_PIVOT).applyMatrix4(gatlingM).applyMatrix4(v.object.matrix)
@@ -643,6 +641,11 @@ export function createFleet(): Fleet {
       } else if (v.kind === 'mech') {
         if (v !== localDriver) v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
         v.gunRecoil = Math.max(0, v.gunRecoil - dt * 6)
+      } else if (v.kind === 'fighter') {
+        // spin: airspeed (m/s)
+        if (v.destroyed) v.targetSpin = v.spin = 0
+        if (v !== localDriver) v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
+        v.gunRecoil = Math.max(0, v.gunRecoil - dt * 8)
       } else {
         if (v !== localDriver) {
           v.spin = THREE.MathUtils.lerp(v.spin, v.targetSpin, Math.min(1, 6 * dt))
@@ -668,13 +671,26 @@ export function createFleet(): Fleet {
         const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
         setInstances(heliModel.statics, n, m, tint)
         setInstances(heliModel.glass, n, m, tint)
-        // The main rotor turns clockwise seen from above
-        setInstances(heliModel.rotor, n, spinAbout(heliModel.rotorHub, heliModel.rotorAxis, -v.rotorAngle).premultiply(m), tint)
-        setInstances(heliModel.tail, n, spinAbout(heliModel.tailHub, heliModel.tailAxis, v.tailAngle).premultiply(m), tint)
+        // The four lift fans spin (alternate ones the other way)
+        DROP.fans.forEach((hub, k) => {
+          const c = hind(hub)
+          setInstances(heliModel!.fans, n * DROP.fans.length + k, spinAbout(c, yAxis, (k % 2 ? -1 : 1) * v.rotorAngle * 3).premultiply(m), tint)
+        })
         setInstances(heliModel.gun, n, part.multiplyMatrices(m, heliGunMatrix(v, turretM)), tint)
         n++
       }
-      finish([...heliModel.statics, ...heliModel.glass, ...heliModel.rotor, ...heliModel.tail, ...heliModel.gun], n)
+      finish([...heliModel.statics, ...heliModel.glass, ...heliModel.gun], n)
+      finish(heliModel.fans, n * DROP.fans.length)
+    }
+
+    for (const [v, rig] of fighterRigs) {
+      rig.object.visible = v.object.position.distanceToSquared(camera) < (VISIBLE_DISTANCE * 1.6) ** 2
+      if (!rig.object.visible) continue
+      rig.setWrecked(v.destroyed)
+      // Engines: a glow when idling with a pilot aboard, a long flame at speed, longer still on boost
+      const landed = v.object.position.y - heightAt(v.object.position.x, v.object.position.z) < FIGHTER_LANDED + 0.4
+      const thrust = v.destroyed ? 0 : v.occupants[0] === null && landed ? 0 : 0.15 + Math.min(1.6, v.spin / 90)
+      rig.update(v.object, thrust, dt)
     }
 
     for (const [v, rig] of mechRigs) {
@@ -712,41 +728,20 @@ export function createFleet(): Fleet {
       }
       finish([...tankModel.hull, ...tankModel.turret, ...tankModel.gun], n)
     }
-    if (running) {
-      const gear = running
-      let n = 0
-      const lp = new THREE.Vector3(), lq = new THREE.Quaternion(), local = new THREE.Matrix4(), one = new THREE.Vector3(1, 1, 1)
+    if (rollers) {
       let slot = 0
-      const wheelSlots = gear.wheels.map(() => 0)
+      const local = new THREE.Matrix4()
       for (const v of tanks) {
         if (v.object.position.distanceToSquared(camera) > VISIBLE_DISTANCE ** 2) continue
         const tint = v.destroyed ? WRECK_TINT : TEAM_TINT[v.team]
         const track = tracks.get(v)!
-        for (const side of ['left', 'right'] as const) {
-          const loop = gear.loops[side]
-          const count = loop.length
-          const u = (side === 'left' ? track.left : track.right) / gear.pitch
-          const k = Math.floor(u), f = u - k
-          for (let i = 0; i < count; i++) {
-            const a = loop[(((i + gear.step * k) % count) + count) % count]
-            const b = loop[(((i + gear.step * (k + 1)) % count) + count) % count]
-            lp.lerpVectors(a.p, b.p, f)
-            lq.slerpQuaternions(a.q, b.q, f)
-            local.compose(lp, lq, one)
-            setInstances(gear.links, slot++, part.multiplyMatrices(v.object.matrix, local), tint)
-          }
+        for (const roller of TANK_ROLLERS) {
+          const angle = (roller.side === 'left' ? track.left : track.right) / TANK_ROLLER_RADIUS
+          local.makeTranslation(roller.center.x, roller.center.y, roller.center.z).multiply(spinM.makeRotationX(angle))
+          setInstances(rollers, slot++, part.multiplyMatrices(v.object.matrix, local), tint)
         }
-        gear.wheels.forEach((group, gi) => {
-          for (const spot of group.spots) {
-            const angle = (spot.side === 'left' ? track.left : track.right) / spot.radius
-            local.makeTranslation(spot.center.x, spot.center.y, spot.center.z).multiply(spinM.makeRotationX(angle)).multiply(fromHub.makeTranslation(-spot.center.x, -spot.center.y, -spot.center.z)).multiply(spot.matrix)
-            setInstances(group.meshes, wheelSlots[gi]++, part.multiplyMatrices(v.object.matrix, local), tint)
-          }
-        })
-        n++
       }
-      finish(gear.links, slot)
-      gear.wheels.forEach((group, gi) => finish(group.meshes, wheelSlots[gi]))
+      finish(rollers, slot)
     }
 
     const near = carNear

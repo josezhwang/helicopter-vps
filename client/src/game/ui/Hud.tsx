@@ -204,13 +204,14 @@ function controlsHint(state: GameState) {
   if (state.onGun) return 'MACHINE GUN — mouse aim · LMB fire (slow, heavy rounds) · E leave the gun'
   if (state.vehicle === 'heli') {
     return state.seat === 0
-      ? 'PILOT — SPACE rotor · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · mouse aim · LMB machine gun · RMB missiles · V view · E exit'
+      ? 'GUNSHIP PILOT — SPACE lift fans · W/S fly · A/D turn · ↑/↓ altitude · ←/→ roll · mouse aim · LMB machine gun · RMB missiles · V view · E exit'
       : state.seat === 1
         ? 'CO-PILOT — mouse aim · LMB fire · F switch weapon · R reload · E get out'
         : 'DOOR GUNNER — mouse aim · LMB fire out of the door · F switch weapon · R reload · E get out'
   }
-  if (state.vehicle === 'car') return 'BATTLE CAR — W/S drive · A/D steer · SPACE brake · mouse aims the roof gatling · LMB fire · V view · E exit'
+  if (state.vehicle === 'car') return 'ASSAULT BUGGY — W/S drive · A/D steer · SPACE brake · mouse aims the roof gatling · LMB fire · V view · E exit'
   if (state.vehicle === 'tank') return 'TANK — W/S drive · A/D turn the hull · mouse aims the turret · LMB fire the cannon · V gunner sight · E exit'
+  if (state.vehicle === 'fighter') return 'FIGHTER — SPACE lift jets · W/S throttle · Shift boost · mouse steers · A/D roll · LMB lasers · RMB missile (hold the nose on an aircraft to lock) · V view · land, then E to get out'
   if (state.vehicle === 'mech') return 'MECH — W/S walk · Shift run · A/D turn · SPACE jump-jets · mouse aims the torso · LMB autocannon · RMB rocket salvo · V view · E exit'
   return 'WASD move · Shift sprint · Space jump · F switch weapon · R reload · Q grenade · V melee · G pick up / drop · E vehicle / machine gun · LMB shoot · RMB aim'
 }
@@ -288,12 +289,12 @@ export function Hud() {
             />
           </div>
         </div>
-        {state.vehicle && <Bar label={state.vehicle === 'heli' ? 'AIRFRAME' : 'HULL'} value={state.vehicleHp} color={state.vehicleHp > 0.5 ? '#8fd0ff' : state.vehicleHp > 0.25 ? '#f4c95d' : '#ef6b66'} />}
+        {state.vehicle && <Bar label={state.vehicle === 'heli' || state.vehicle === 'fighter' ? 'AIRFRAME' : 'HULL'} value={state.vehicleHp} color={state.vehicleHp > 0.5 ? '#8fd0ff' : state.vehicleHp > 0.25 ? '#f4c95d' : '#ef6b66'} />}
         {state.onGun ? (
           <div style={{ fontSize: 18, color: '#ffb35a' }}>MACHINE GUN</div>
         ) : state.carGun ? (
-          <div style={{ fontSize: 18, color: state.vehicle === 'heli' && state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
-            {state.vehicle === 'heli' ? `NOSE GUN · ${state.cannon >= 1 ? 'MISSILES READY' : `MISSILES RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : 'ROOF GATLING'}
+          <div style={{ fontSize: 18, color: (state.vehicle === 'heli' || state.vehicle === 'fighter') && state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
+            {state.vehicle === 'fighter' ? `LASERS · ${state.cannon >= 1 ? (state.lock >= 1 ? 'MISSILE LOCKED' : 'MISSILE READY') : `MISSILE RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : state.vehicle === 'heli' ? `BALL TURRET · ${state.cannon >= 1 ? 'MISSILES READY' : `MISSILES RELOADING ${Math.round(Math.max(0, state.cannon) * 100)}%`}` : 'ROOF GATLING'}
           </div>
         ) : state.vehicle === 'mech' ? (
           <div style={{ fontSize: 18, color: state.cannon >= 1 ? '#5dff8a' : '#ffb35a' }}>
@@ -317,9 +318,14 @@ export function Hud() {
           </div>
         )}
         {!state.vehicle && !state.onGun && <div style={{ fontSize: 13, color: state.grenades ? '#c8e6a0' : '#6f8599' }}>[Q] GRENADES {state.grenades}</div>}
-        {state.vehicle === 'heli' && state.seat === 0 && <div style={{ fontSize: 16, color: '#ffe08f' }}>ROTOR {state.rotorRpm}</div>}
+        {state.vehicle === 'heli' && state.seat === 0 && <div style={{ fontSize: 16, color: '#ffe08f' }}>LIFT FANS {state.rotorRpm}</div>}
         {state.vehicle === 'mech' && <Bar label="JUMP-JETS" value={state.jet} color={state.jet > 0.25 ? '#7fe3ff' : '#ffb35a'} />}
         {(state.vehicle === 'car' || state.vehicle === 'tank' || state.vehicle === 'mech') && <div style={{ fontSize: 16, color: '#ffe08f' }}>{state.speedKmh} km/h</div>}
+        {state.vehicle === 'fighter' && (
+          <div style={{ fontSize: 16, color: '#ffe08f' }}>
+            {state.speedKmh} km/h{state.boost ? ' · BOOST' : ''} · ALT {state.altitude} m{state.altitude > 300 ? ' · SPACE' : ''}
+          </div>
+        )}
         <div style={{ opacity: 0.85 }}>{controlsHint(state)}</div>
       </div>
 

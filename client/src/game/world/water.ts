@@ -58,8 +58,9 @@ vec2 waveSlope(vec2 p, float t) {
 }`)
       .replace('#include <map_fragment>', /* glsl */ `
 float waterDepth = max(${WATER_LEVEL.toFixed(2)} - terrainHeight(vWaterPos.xz), 0.0);
-vec3 shallow = vec3(0.06, 0.27, 0.25);
-vec3 deep = vec3(0.01, 0.055, 0.075);
+// Alien water: milky jade in the shallows, dark violet-teal in the deep
+vec3 shallow = vec3(0.1, 0.34, 0.26);
+vec3 deep = vec3(0.025, 0.035, 0.07);
 diffuseColor.rgb = mix(shallow, deep, 1.0 - exp(-waterDepth * 0.22));
 // Clear at the edge, opaque once it's a few metres deep
 diffuseColor.a = mix(0.35, 0.93, smoothstep(0.0, 3.5, waterDepth));

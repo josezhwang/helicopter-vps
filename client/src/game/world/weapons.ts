@@ -43,26 +43,26 @@ export interface WeaponDef {
 
 const def = (d: WeaponDef) => d
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
-  handgun: def({ kind: 'handgun', name: 'Handgun', slot: 'sidearm', ammo: '9mm', model: 'handgun', power: 15, magSize: 7, fireRate: 0.28, range: 160, spread: 0.006, reloadTime: 1.2, automatic: false, round: 'bullet_9mm', color: 0xffe8a3, kick: 0.02, zoom: 1.25 }),
-  primary: def({ kind: 'primary', name: 'Primary Gun', slot: 'long', ammo: '556', model: 'primary', power: 9, magSize: 30, fireRate: 0.1, range: 260, spread: 0.012, reloadTime: 1.8, automatic: true, round: 'bullet_556', color: 0xffd27a, kick: 0.006, zoom: 1.4 }),
-  m4a1: def({ kind: 'm4a1', name: 'M4A1', slot: 'long', ammo: '556', model: 'gun_m4a1', power: 11, magSize: 30, fireRate: 0.085, range: 300, spread: 0.009, reloadTime: 2, automatic: true, round: 'bullet_556', color: 0xffd27a, kick: 0.007, zoom: 1.5 }),
-  m254: def({ kind: 'm254', name: 'M254 Rifle', slot: 'long', ammo: '556', model: 'gun_m254', power: 13, magSize: 36, fireRate: 0.11, range: 320, spread: 0.008, reloadTime: 2.2, automatic: true, round: 'bullet_556', color: 0x9fe0ff, kick: 0.008, zoom: 1.6 }),
-  pulse: def({ kind: 'pulse', name: 'Heavy Pulse MG', slot: 'long', ammo: '762', model: 'gun_pulse', power: 12, magSize: 60, fireRate: 0.07, range: 280, spread: 0.03, reloadTime: 3.2, automatic: true, round: 'bullet_heavy', color: 0x8fd8ff, kick: 0.01, zoom: 1.3 }),
-  m240b: def({ kind: 'm240b', name: 'M240B', slot: 'long', ammo: '762', model: 'gun_m240b', power: 15, magSize: 100, fireRate: 0.09, range: 350, spread: 0.025, reloadTime: 4.2, automatic: true, round: 'bullet_heavy', color: 0xffc070, kick: 0.012, zoom: 1.3 }),
-  plasma: def({ kind: 'plasma', name: 'Plasma Gun', slot: 'long', ammo: 'plasma', model: 'gun_plasma', power: 34, magSize: 8, fireRate: 0.55, range: 140, spread: 0.01, reloadTime: 2.5, automatic: false, round: 'bolt', color: 0x6dff7a, kick: 0.03, zoom: 1.3 }),
-  m170: def({ kind: 'm170', name: 'M170 Sniper', slot: 'long', ammo: 'sniper', model: 'gun_m170', power: 80, magSize: 5, fireRate: 1.3, range: 650, spread: 0, reloadTime: 3, automatic: false, round: 'bullet_556', color: 0xfff2c0, kick: 0.05, zoom: 5, scope: true }),
-  svd: def({ kind: 'svd', name: 'SVD Dragunov', slot: 'long', ammo: 'sniper', model: 'gun_svd', power: 55, magSize: 10, fireRate: 0.45, range: 550, spread: 0.002, reloadTime: 2.6, automatic: false, round: 'bullet_556', color: 0xfff2c0, kick: 0.035, zoom: 4, scope: true }),
-  launcher: def({ kind: 'launcher', name: 'AA Launcher', slot: 'launcher', ammo: 'missile', model: 'launcher', power: 0, magSize: 1, fireRate: 1.5, range: 700, spread: 0, reloadTime: 2.2, automatic: false, round: null, color: 0xffffff, kick: 0.03, zoom: 1.5 }),
+  handgun: def({ kind: 'handgun', name: 'Z-1V Volt Pistol', slot: 'sidearm', ammo: '9mm', model: 'handgun', power: 15, magSize: 7, fireRate: 0.28, range: 160, spread: 0.006, reloadTime: 1.2, automatic: false, round: 'bullet_9mm', color: 0xffe8a3, kick: 0.02, zoom: 1.25 }),
+  primary: def({ kind: 'primary', name: 'AR-H470 Pulse Rifle', slot: 'long', ammo: '556', model: 'primary', power: 9, magSize: 30, fireRate: 0.1, range: 260, spread: 0.012, reloadTime: 1.8, automatic: true, round: 'bullet_556', color: 0xffd27a, kick: 0.006, zoom: 1.4 }),
+  m4a1: def({ kind: 'm4a1', name: 'SMG-M32', slot: 'long', ammo: '556', model: 'gun_m4a1', power: 11, magSize: 30, fireRate: 0.085, range: 300, spread: 0.009, reloadTime: 2, automatic: true, round: 'bullet_556', color: 0xffd27a, kick: 0.007, zoom: 1.5 }),
+  m254: def({ kind: 'm254', name: 'BR-9 Battle Rifle', slot: 'long', ammo: '556', model: 'gun_m254', power: 13, magSize: 36, fireRate: 0.11, range: 320, spread: 0.008, reloadTime: 2.2, automatic: true, round: 'bullet_556', color: 0x9fe0ff, kick: 0.008, zoom: 1.6 }),
+  pulse: def({ kind: 'pulse', name: 'HMG-379 Heavy Rifle', slot: 'long', ammo: '762', model: 'gun_pulse', power: 12, magSize: 60, fireRate: 0.07, range: 280, spread: 0.03, reloadTime: 3.2, automatic: true, round: 'bullet_heavy', color: 0x8fd8ff, kick: 0.01, zoom: 1.3 }),
+  m240b: def({ kind: 'm240b', name: 'Rotary Cannon', slot: 'long', ammo: '762', model: 'gun_m240b', power: 15, magSize: 100, fireRate: 0.09, range: 350, spread: 0.025, reloadTime: 4.2, automatic: true, round: 'bullet_heavy', color: 0xffc070, kick: 0.012, zoom: 1.3 }),
+  plasma: def({ kind: 'plasma', name: 'Plasma Caster', slot: 'long', ammo: 'plasma', model: 'gun_plasma', power: 34, magSize: 8, fireRate: 0.55, range: 140, spread: 0.01, reloadTime: 2.5, automatic: false, round: 'bolt', color: 0xc060ff, kick: 0.03, zoom: 1.3 }),
+  m170: def({ kind: 'm170', name: 'M13 Gauss Sniper', slot: 'long', ammo: 'sniper', model: 'gun_m170', power: 80, magSize: 5, fireRate: 1.3, range: 650, spread: 0, reloadTime: 3, automatic: false, round: 'bullet_556', color: 0xfff2c0, kick: 0.05, zoom: 5, scope: true }),
+  svd: def({ kind: 'svd', name: 'Longbow Rail Rifle', slot: 'long', ammo: 'sniper', model: 'gun_svd', power: 55, magSize: 10, fireRate: 0.45, range: 550, spread: 0.002, reloadTime: 2.6, automatic: false, round: 'bullet_556', color: 0xfff2c0, kick: 0.035, zoom: 4, scope: true }),
+  launcher: def({ kind: 'launcher', name: 'M236 Rocket Launcher', slot: 'launcher', ammo: 'missile', model: 'launcher', power: 0, magSize: 1, fireRate: 1.5, range: 700, spread: 0, reloadTime: 2.2, automatic: false, round: null, color: 0xffffff, kick: 0.03, zoom: 1.5 }),
 }
 
 /** Spare rounds you can carry per ammo type (on top of what is loaded), and what the bases' ammo boxes hold. */
 export const AMMO: Record<AmmoType, { name: string; max: number; box: number }> = {
-  '9mm': { name: '9mm rounds', max: 14, box: 42 },
-  '556': { name: '5.56 rounds', max: 60, box: 120 },
-  '762': { name: '7.62 belts', max: 200, box: 300 },
-  sniper: { name: 'sniper rounds', max: 20, box: 30 },
+  '9mm': { name: 'pistol cells', max: 14, box: 42 },
+  '556': { name: 'rifle rounds', max: 60, box: 120 },
+  '762': { name: 'heavy belts', max: 200, box: 300 },
+  sniper: { name: 'gauss slugs', max: 20, box: 30 },
   plasma: { name: 'plasma cells', max: 24, box: 32 },
-  missile: { name: 'AA missiles', max: 4, box: 4 },
+  missile: { name: 'rockets', max: 4, box: 4 },
   grenade: { name: 'grenades', max: 4, box: 8 },
 }
 export const AMMO_TYPES = Object.keys(AMMO) as AmmoType[]

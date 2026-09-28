@@ -11,8 +11,11 @@ import { bakeGroundMap, type GroundMap } from './world/groundMap'
 import { createTurrets, type Turret, type TurretField } from './world/turrets'
 import {
   createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, CAR_GUN_PITCH, TURRET_PIVOT, GATLING_PIVOT,
-  TANK_GUN_PIVOT, TANK_GUN_PITCH, TANK_TURRET_PIVOT, MECH_RADIUS, MECH_AIRBORNE, HELI_GUN_PIVOT, HELI_GUN_LIMITS, TANK_CIRCLE_RADIUS, TANK_CIRCLE_OFFSET, TANK_LENGTH, TANK_WIDTH, VEHICLE_MAX_HP, type Fleet, type Vehicle,
+  TANK_GUN_PIVOT, TANK_GUN_PITCH, TANK_TURRET_PIVOT, MECH_RADIUS, MECH_AIRBORNE, HELI_GUN_PIVOT, HELI_GUN_LIMITS, HELI_PODS, TANK_CIRCLE_RADIUS, TANK_CIRCLE_OFFSET, TANK_LENGTH, TANK_WIDTH, TANK_SIGHT, VEHICLE_MAX_HP, type Fleet, type Vehicle,
 } from './world/vehicles'
+import { FIGHTER_LANDED } from './world/vehicles'
+import { fighterSpec } from './world/fighters'
+import { createSpaceZone, type SpaceZone } from './world/space'
 import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, LAYOUT, PLATEAU_HALF, baseToWorld, baseYaw } from './world/layout'
 import { createOutposts, type Outposts } from './world/outposts'
 import { createGrenades, GRENADE_FUSE, THROW_SPEED, type Grenades } from './world/grenades'
@@ -71,7 +74,7 @@ const PLAYER_BLOCK_HEIGHT = 1.8
 const SNAP_DISTANCE = 25
 const TEAM_NAME: Record<Team, string> = { blue: 'BLUE', red: 'RED' }
 /** How close you have to be to get in (metres from the vehicle's centre) or onto a machine gun. */
-const BOARD_RANGE = { heli: 7.5, car: 6, tank: 6.5, mech: 5.5 }
+const BOARD_RANGE = { heli: 7.5, car: 6, tank: 6.5, mech: 5.5, fighter: 6.5 }
 const GUN_RANGE = 3.8
 /** Battle car handling: top speed / reverse speed (m/s), acceleration, braking, coasting (m/s²), steering lock. */
 const CAR_MAX_SPEED = 24
@@ -83,7 +86,7 @@ const CAR_MAX_STEER = 0.55
 /** Cars can't drive into water deeper than this (terrain height; the water surface is at -6). */
 const CAR_WATER_LIMIT = -4.5
 /** Eye position of the car's roof gunner, in car space. */
-const CAR_GUNNER_SEAT = new THREE.Vector3(0, 4.4, -0.3)
+const CAR_GUNNER_SEAT = new THREE.Vector3(0, 2.55, -0.6)
 const WORLD_LIMIT = 480
 /** Seconds to climb into / out of a helicopter. */
 const BOARD_TIME = 1.5
@@ -101,9 +104,7 @@ const TANK_TURRET_SPEED = 0.9
 const TANK_PITCH_SPEED = 0.6
 /** Seconds to load the next shell (the server allows no faster). */
 const TANK_RELOAD = 3
-/** Gunner's sight: eye position in turret space, and its magnification. */
-/** The gunner's sight on the turret roof (relative to the turret's turning axis). */
-const TANK_SIGHT = new THREE.Vector3(0.35, 3.75, 0.4)
+/** The gunner's sight's magnification (its eye position comes with the tank model). */
 const TANK_SIGHT_ZOOM = 2.4
 /** How far a tank shell and an unguided rocket fly before they go off by themselves. */
 const SHELL_RANGE = 640
@@ -131,8 +132,24 @@ const MECH_CANNON = { id: 'mech-cannon', power: 22, fireRate: 0.11, range: 420, 
 const MECH_SALVO = 6
 /** The helicopter's nose gun (the gunner's seat). */
 const HELI_GUN = { id: 'heli-gun', power: 16, fireRate: 0.09, range: 400, spread: 0.012, color: 0xffd08a }
+/**
+ * Space fighter: airspeed limits (m/s) — below HOVER it hangs on its lift jets (SPACE climbs), above it flies like a
+ * jet wherever the nose points — how fast it turns towards where you look, and how high it can go.
+ */
+const FIGHTER_CRUISE = 95
+const FIGHTER_BOOST = 165
+const FIGHTER_HOVER = 26
+const FIGHTER_ACCEL = 34
+const FIGHTER_TURN = 1.45
+const FIGHTER_CEILING = 1000
+/** The nose lasers (alternating guns) and the homing missiles from the pods. */
+const FIGHTER_LASER = { id: 'fighter-laser', fireRate: 0.07, range: 520, color: 0x8ff0ff }
+const FIGHTER_MISSILE_GAP = 2.3
+const FIGHTER_LOCK_CONE = 0.2
+const FIGHTER_LOCK_TIME = 1.1
+const FIGHTER_MISSILE_RANGE = 700
 /** The pilot's missiles: salvos of four from the wing pods (helicopter space), then a reload. */
-const HELI_PODS = [new THREE.Vector3(2.35, 1.2, 0.8), new THREE.Vector3(-2.35, 1.2, 0.8)]
+// (the gunship's wing pods come with its model: HELI_PODS)
 const HELI_SALVO = 4
 const HELI_ROCKET_GAP = 0.22
 const HELI_SALVO_RELOAD = 6
@@ -151,7 +168,7 @@ const KILL_FEED_SIZE = 5
 const BLAST_SIZE: Record<BlastKind, number> = { shell: 1.5, rocket: 1.4, grenade: 1, barrel: 1.8 }
 /** What the kill feed calls each way to die (weapons use their own names). */
 const HOW_LABEL: Record<string, string> = {
-  'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Helicopter nose gun', missile: 'AA missile', shell: 'Tank shell', rocket: 'Rocket',
+  'machine-gun': 'Machine gun', 'car-gun': 'Roof gatling', 'mech-cannon': 'Mech autocannon', 'heli-gun': 'Gunship ball turret', 'fighter-laser': 'Fighter lasers', 'fighter-missile': 'Fighter missile', missile: 'AA missile', shell: 'Tank shell', rocket: 'Rocket',
   grenade: 'Grenade', barrel: 'Barrel', wreck: 'Wreck', melee: 'Melee', assassination: 'Assassination',
 }
 /** Melee: how far a strike reaches (the server allows a little more), how often, and the lunge's speed. */
@@ -168,9 +185,9 @@ const howLabel = (how: string) => HOW_LABEL[how] ?? WEAPONS[how as WeaponKind]?.
 /** What each weapon sounds like. */
 const SHOT_SOUND: Record<string, ShotSound> = {
   handgun: 'pistol', primary: 'rifle', m4a1: 'rifle', m254: 'rifle', pulse: 'heavy', m240b: 'heavy', plasma: 'plasma',
-  m170: 'sniper', svd: 'sniper', 'machine-gun': 'mg', 'car-gun': 'gatling', 'mech-cannon': 'heavy', 'heli-gun': 'gatling',
+  m170: 'sniper', svd: 'sniper', 'machine-gun': 'mg', 'car-gun': 'gatling', 'mech-cannon': 'heavy', 'heli-gun': 'gatling', 'fighter-laser': 'plasma',
 }
-const LABEL: Record<Vehicle['kind'], string> = { heli: 'helicopter', car: 'battle car', tank: 'tank', mech: 'combat mech' }
+const LABEL: Record<Vehicle['kind'], string> = { heli: 'gunship', car: 'assault buggy', tank: 'tank', mech: 'combat mech', fighter: 'space fighter' }
 const label = (v: Vehicle) => LABEL[v.kind]
 const other = (team: Team): Team => (team === 'blue' ? 'red' : 'blue')
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a))
@@ -205,6 +222,12 @@ export class BattlefieldGame {
   private lastVehicleYaw = 0
   private heliYaw = 0
   private heliThrottle = 0
+  /** Flying a fighter: throttle 0..1, climb speed on the lift jets, gun and missile timers, the missile lock. */
+  private fighterThrottle = 0
+  private fighterVy = 0
+  private fighterGunCooldown = 0
+  private fighterMissileAt = 0
+  private fighterLock: { target: Vehicle | null; time: number } = { target: null, time: 0 }
   private heliRoll = 0
   private heliPitch = 0
   private heliAltitude = 0
@@ -263,6 +286,8 @@ export class BattlefieldGame {
   private recharging = false
   private sky: SkyRig
   private water: ReturnType<typeof createWater>
+  /** Capital ships and asteroids up in the space zone. */
+  private space: SpaceZone
   private graphics: Graphics
   private deathCamRoll = 0
   private renderer: THREE.WebGLRenderer
@@ -346,6 +371,8 @@ export class BattlefieldGame {
     this.scene.add(this.terrain)
     this.water = createWater()
     this.scene.add(this.water.mesh)
+    this.space = createSpaceZone()
+    this.scene.add(this.space.group)
     for (let i = 0; i < 2; i++) {
       const light = new THREE.PointLight(0xffa860, 0, 45, 2)
       this.scene.add(light)
@@ -625,7 +652,7 @@ export class BattlefieldGame {
       this.arsenal.reset()
       this.respawnPlayer()
       this.recharging = false
-      setGameState({ dead: false, health: 100, shield: 100, message: 'Back in the fight! Fresh handgun and primary gun.' })
+      setGameState({ dead: false, health: 100, shield: 100, message: 'Back in the fight! Fresh pistol and pulse rifle.' })
       this.publishRoster()
       return
     }
@@ -659,10 +686,11 @@ export class BattlefieldGame {
       this.turrets.gunnerView(t, new THREE.Vector3(), start)
       t.recoil = 1
       heavy = true
-    } else if ((weapon === CAR_GUN.id || weapon === MECH_CANNON.id || weapon === HELI_GUN.id) && s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
+    } else if ((weapon === CAR_GUN.id || weapon === MECH_CANNON.id || weapon === HELI_GUN.id || weapon === FIGHTER_LASER.id) && s.vehicle && this.fleet.byId.has(s.vehicle.id)) {
       const vehicle = this.fleet.byId.get(s.vehicle.id)!
       start = this.fleet.carMuzzle(vehicle, new THREE.Vector3())
       vehicle.gunRecoil = 1
+      if (weapon === FIGHTER_LASER.id) vehicle.gatlingSpin++
       heavy = true
     } else if (remote.avatar.group.visible) {
       start = remote.avatar.fire()
@@ -673,8 +701,9 @@ export class BattlefieldGame {
       return
     }
     const def = WEAPONS[weapon as WeaponKind] as (typeof WEAPONS)[WeaponKind] | undefined
-    const round: RoundKind = heavy ? 'bullet_heavy' : def?.round ?? 'bullet_556'
-    const color = heavy ? (weapon === CAR_GUN.id ? CAR_GUN.color : weapon === MECH_CANNON.id ? MECH_CANNON.color : weapon === HELI_GUN.id ? HELI_GUN.color : MACHINE_GUN.color) : def?.color ?? 0xffd27a
+    const laser = weapon === FIGHTER_LASER.id
+    const round: RoundKind = laser ? 'bolt' : heavy ? 'bullet_heavy' : def?.round ?? 'bullet_556'
+    const color = laser ? FIGHTER_LASER.color : heavy ? (weapon === CAR_GUN.id ? CAR_GUN.color : weapon === MECH_CANNON.id ? MECH_CANNON.color : weapon === HELI_GUN.id ? HELI_GUN.color : MACHINE_GUN.color) : def?.color ?? 0xffd27a
     const dir = end.clone().sub(start)
     const distance = dir.length()
     dir.normalize()
@@ -871,8 +900,9 @@ export class BattlefieldGame {
       vehicle.object.position.set(...at.p)
       vehicle.object.rotation.set(at.r[0], at.r[1], at.r[2])
     }
-    const center = vehicle.kind === 'heli' ? this.aimPoint(vehicle) : vehicle.object.localToWorld(new THREE.Vector3(0, 1.4, 0))
-    this.projectiles.explosion(center, 2, vehicle.kind !== 'heli')
+    const air = vehicle.kind === 'heli' || vehicle.kind === 'fighter'
+    const center = air ? this.aimPoint(vehicle) : vehicle.object.localToWorld(new THREE.Vector3(0, 1.4, 0))
+    this.projectiles.explosion(center, 2, !air)
     this.flashLight(center, 0xff8a3a, 5000, 0.8)
     this.audio.explosion(center, 2)
     const d = center.distanceTo(this.camera.position)
@@ -888,8 +918,9 @@ export class BattlefieldGame {
     vehicle.occupants.fill(null)
     this.projectiles.burn(() => (vehicle.destroyed ? vehicle.object.position.clone().add(new THREE.Vector3(0, 1.5, 0)) : null), 30)
     if (this.lock.target === vehicle) this.lock = { target: null, time: 0 }
+    if (this.fighterLock.target === vehicle) this.fighterLock = { target: null, time: 0 }
     const byName = by === this.match.you ? 'You' : this.nameOf(by)
-    setGameState({ message: vehicle.kind === 'heli' ? `${byName} shot down a helicopter!` : `${byName} destroyed a ${label(vehicle)}!` })
+    setGameState({ message: air ? `${byName} shot down a ${label(vehicle)}!` : `${byName} destroyed a ${label(vehicle)}!` })
   }
 
   vehicleRepaired(id: string) {
@@ -947,7 +978,7 @@ export class BattlefieldGame {
     this.arsenal.addReserve(ammo, took.count)
     // A weapon waiting for rounds (a launcher for its first missile) loads straight away
     if (this.arsenal.def?.ammo === ammo && this.arsenal.mag === 0) this.arsenal.reload()
-    setGameState({ message: ammo === 'missile' ? `Took ${took.count} AA missile${took.count > 1 ? 's' : ''}.` : `Took ${took.count} ${AMMO[ammo].name}.` })
+    setGameState({ message: ammo === 'missile' ? `Took ${took.count} rocket${took.count > 1 ? 's' : ''}.` : `Took ${took.count} ${AMMO[ammo].name}.` })
   }
 
   /** Back at our spawn, looking out of the gate. */
@@ -1240,7 +1271,7 @@ export class BattlefieldGame {
       vehicle: vehicle && pose
         ? {
           id: vehicle.id, seat: this.seat, p: [pose.position.x, pose.position.y, pose.position.z], r: [pose.rotation.x, pose.rotation.y, pose.rotation.z],
-          spin: vehicle.kind === 'heli' ? vehicle.spin : this.carSpeed,
+          spin: vehicle.kind === 'heli' || vehicle.kind === 'fighter' ? vehicle.spin : this.carSpeed,
           ...(this.seat === 0 ? { aim: [vehicle.aimYaw, vehicle.aimPitch] as [number, number] } : {}),
         }
         : null,
@@ -1555,7 +1586,7 @@ export class BattlefieldGame {
       const held = this.arsenal.inSlotOf(item.kind)
       return held ? `Swap your ${WEAPONS[held.kind].name} for the ${name}` : `Pick up the ${name}`
     }
-    if (ammoOf(item.kind) === 'missile') return item.count > 0 ? `Take AA missiles (${item.count} left)` : 'Missile crate (empty)'
+    if (ammoOf(item.kind) === 'missile') return item.count > 0 ? `Take rockets (${item.count} left)` : 'Missile crate (empty)'
     return item.count > 0 ? `Take ${name} (${item.count})` : `${name} box (empty)`
   }
 
@@ -1576,7 +1607,7 @@ export class BattlefieldGame {
     if (this.enemiesAboard(vehicle).length) {
       // Enemies inside: pull them out if it's standing still on the ground, and take it
       if (!this.grounded(vehicle)) {
-        setGameState({ message: vehicle.kind === 'heli' ? 'The enemy is flying it — shoot it down or wait for it to land.' : `The enemy is driving that ${label(vehicle)} — stop it first.` })
+        setGameState({ message: vehicle.kind === 'heli' || vehicle.kind === 'fighter' ? 'The enemy is flying it — shoot it down or wait for it to land.' : `The enemy is driving that ${label(vehicle)} — stop it first.` })
         return
       }
       if (this.pendingHijack && this.pendingHijack.until > performance.now()) return
@@ -1587,7 +1618,7 @@ export class BattlefieldGame {
     }
     const seat = vehicle.occupants.findIndex((o) => o === null)
     if (seat < 0) {
-      setGameState({ message: vehicle.kind === 'heli' ? 'That helicopter is full.' : `That ${label(vehicle)} is being driven by ${this.nameOf(driverOf(vehicle)!)}.` })
+      setGameState({ message: vehicle.kind === 'heli' ? 'That gunship is full.' : `That ${label(vehicle)} is being driven by ${this.nameOf(driverOf(vehicle)!)}.` })
       return
     }
     this.enterVehicle(vehicle, seat)
@@ -1602,6 +1633,7 @@ export class BattlefieldGame {
   private grounded(vehicle: Vehicle) {
     const p = vehicle.object.position
     if (vehicle.kind === 'heli') return p.y - this.fleet.restHeight(vehicle, p.x, p.z) < 1.5
+    if (vehicle.kind === 'fighter') return p.y - this.fleet.restHeight(vehicle, p.x, p.z) < 1.5 && Math.abs(vehicle.spin) < 6
     if (vehicle.kind === 'mech') return p.y - heightAt(p.x, p.z) < MECH_AIRBORNE && Math.abs(vehicle.spin) < 4
     return Math.abs(vehicle.spin) < 4
   }
@@ -1672,20 +1704,22 @@ export class BattlefieldGame {
     if (vehicle.destroyed) return `Wrecked ${label(vehicle)}`
     const enemies = this.enemiesAboard(vehicle)
     if (enemies.length) {
-      if (!this.grounded(vehicle)) return vehicle.kind === 'heli' ? 'Enemy helicopter in the air — shoot it down' : `Enemy ${label(vehicle)} on the move`
+      if (!this.grounded(vehicle)) return vehicle.kind === 'heli' || vehicle.kind === 'fighter' ? `Enemy ${label(vehicle)} in the air — shoot it down` : `Enemy ${label(vehicle)} on the move`
       return `Pull ${this.nameOf(enemies[0])}${enemies.length > 1 ? ` and ${enemies.length - 1} more` : ''} out and take the ${label(vehicle)}`
     }
     const seat = vehicle.occupants.findIndex((o) => o === null)
-    if (seat < 0) return vehicle.kind === 'heli' ? 'Helicopter (full)' : `${label(vehicle)[0].toUpperCase()}${label(vehicle).slice(1)} (taken)`
-    if (vehicle.kind === 'car') return 'Drive battle car'
+    if (seat < 0) return vehicle.kind === 'heli' ? 'Gunship (full)' : `${label(vehicle)[0].toUpperCase()}${label(vehicle).slice(1)} (taken)`
+    if (vehicle.kind === 'car') return 'Drive the assault buggy'
     if (vehicle.kind === 'tank') return 'Drive tank'
     if (vehicle.kind === 'mech') return 'Pilot the combat mech'
-    return seat === 0 ? 'Fly helicopter (pilot — nose gun and missiles)' : seat === 1 ? 'Board helicopter (co-pilot — your own weapons)' : 'Board helicopter (door gunner — your own weapons)'
+    if (vehicle.kind === 'fighter') return 'Fly the space fighter'
+    return seat === 0 ? 'Fly the gunship (pilot — ball turret and missiles)' : seat === 1 ? 'Board the gunship (co-pilot — your own weapons)' : 'Board the gunship (door gunner — your own weapons)'
   }
 
   /** Eye position of a seat, in the vehicle's local space (a tank's gunner sight turns with the turret). */
   private seatEye(vehicle: Vehicle, seat: number) {
     if (vehicle.kind === 'heli') return this.fleet.heliSeats[seat].eye.clone()
+    if (vehicle.kind === 'fighter') return fighterSpec(vehicle.team).cockpit.clone()
     if (vehicle.kind === 'tank') return TANK_SIGHT.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), vehicle.aimYaw).add(TANK_TURRET_PIVOT)
     if (vehicle.kind === 'mech') {
       // The cockpit rides on the torso (it twists and bobs as the mech walks)
@@ -1727,9 +1761,18 @@ export class BattlefieldGame {
         vehicle: 'heli',
         seat,
         message: seat === 0
-          ? 'PILOT: SPACE spins up the rotor, W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll. Mouse aims — LMB nose machine gun, RMB missiles. V camera, E to get out.'
+          ? 'PILOT: SPACE spins up the lift fans, W/S fly, A/D turn, ↑/↓ altitude, ←/→ roll. Mouse aims — LMB nose machine gun, RMB missiles. V camera, E to get out.'
           : seat === 1 ? 'Co-pilot: aim with the mouse and shoot with your own weapons. E to get out.' : 'Door gunner: lean out of the cabin door — aim with the mouse and shoot. E to get out.',
       })
+    } else if (vehicle.kind === 'fighter') {
+      this.fighterThrottle = 0
+      this.fighterVy = 0
+      vehicle.targetSpin = vehicle.spin = 0
+      this.cameraMode = 'chase'
+      this.player.pitch = 0
+      this.fighterMissileAt = performance.now() + 1000
+      this.fighterLock = { target: null, time: 0 }
+      setGameState({ vehicle: 'fighter', seat: 0, message: 'SPACE FIGHTER: hold SPACE to lift off, W/S throttle, Shift boost, mouse steers (A/D roll). Climb high to reach space! LMB lasers, RMB homing missiles (hold the nose on an enemy aircraft to lock). V view, land to get out (E).' })
     } else if (vehicle.kind === 'mech') {
       this.carSpeed = 0
       vehicle.targetSpin = 0
@@ -1760,6 +1803,10 @@ export class BattlefieldGame {
   private exitVehicle() {
     const vehicle = this.vehicle
     if (!vehicle) return
+    if (vehicle.kind === 'fighter' && !this.grounded(vehicle)) {
+      setGameState({ message: 'Land first: slow right down (S) and let it settle on the ground, then E.' })
+      return
+    }
     if (vehicle.kind === 'heli') {
       const outside = this.fleet.heliSeats[this.seat].outside
       const spot = vehicle.object.localToWorld(new THREE.Vector3(outside.x * 1.2, 0, outside.z))
@@ -1780,7 +1827,7 @@ export class BattlefieldGame {
       return
     }
     this.leaveVehicle()
-    const side = vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : 3.6
+    const side = vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : vehicle.kind === 'fighter' ? 5.2 : 3.6
     const circles = [...this.solidCircles, ...this.fleet.circles(null)]
     const clear = (spot: THREE.Vector3) => circles.every((c) => Math.hypot(c.x - spot.x, c.z - spot.z) > c.r + 0.7)
     const candidates = [new THREE.Vector3(side, 0, 0), new THREE.Vector3(-side, 0, 0), new THREE.Vector3(0, 0, -side * 2), new THREE.Vector3(0, 0, side * 2)]
@@ -1803,7 +1850,7 @@ export class BattlefieldGame {
       vehicle.targetSpin = 0
       // A car rolls on; a tank's tracks stop it where it is
       if (vehicle.kind === 'car') vehicle.spin = this.carSpeed
-      if (vehicle.kind === 'tank' || vehicle.kind === 'mech') vehicle.spin = 0
+      if (vehicle.kind === 'tank' || vehicle.kind === 'mech' || vehicle.kind === 'fighter') vehicle.spin = 0
     }
     this.carSpeed = 0
     this.seat = 0
@@ -1821,7 +1868,7 @@ export class BattlefieldGame {
     const seat = this.seat
     this.leaveVehicle()
     // Out through our own door (a helicopter) or beside it
-    const local = vehicle.kind === 'heli' ? this.fleet.heliSeats[seat].outside.clone().setY(0).multiplyScalar(1.2) : new THREE.Vector3(vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : 3.5, 0, 0)
+    const local = vehicle.kind === 'heli' ? this.fleet.heliSeats[seat].outside.clone().setY(0).multiplyScalar(1.2) : new THREE.Vector3(vehicle.kind === 'tank' ? 4 : vehicle.kind === 'mech' ? 4.2 : vehicle.kind === 'fighter' ? 5.2 : 3.5, 0, 0)
     const spot = vehicle.object.localToWorld(local)
     this.player.position.set(spot.x, Math.max(vehicle.object.position.y, heightAt(spot.x, spot.z)) + EYE_HEIGHT, spot.z)
     this.player.velocity.set(0, 0, 0)
@@ -1833,7 +1880,7 @@ export class BattlefieldGame {
   private cycleVehicleCamera() {
     if (!this.vehicle || this.seat !== 0 || this.transition) return
     this.cameraMode = this.cameraMode === 'inside' ? 'chase' : 'inside'
-    const inside = this.vehicle.kind === 'heli' || this.vehicle.kind === 'mech' ? 'COCKPIT VIEW' : this.vehicle.kind === 'tank' ? 'GUNNER SIGHT' : 'ROOF GUN'
+    const inside = this.vehicle.kind === 'heli' || this.vehicle.kind === 'mech' || this.vehicle.kind === 'fighter' ? 'COCKPIT VIEW' : this.vehicle.kind === 'tank' ? 'GUNNER SIGHT' : 'ROOF GUN'
     setGameState({ message: `${this.cameraMode === 'inside' ? inside : 'CHASE VIEW'} — press V to change camera.` })
   }
 
@@ -1869,6 +1916,7 @@ export class BattlefieldGame {
     if (!vehicle || this.transition) return
     if (this.seat === 0) {
       if (vehicle.kind === 'heli') this.updateHelicopter(vehicle, dt)
+      else if (vehicle.kind === 'fighter') this.updateFighter(vehicle, dt)
       else if (vehicle.kind === 'tank') this.updateTank(vehicle, dt)
       else if (vehicle.kind === 'mech') this.updateMech(vehicle, dt)
       else this.updateCar(vehicle, dt)
@@ -1876,15 +1924,29 @@ export class BattlefieldGame {
     // The camera turns with the vehicle and the mouse looks around on top of that (a tank's turret doesn't
     // turn with its hull: the view stays where you aim)
     const yaw = vehicle.object.rotation.y
-    if (vehicle.kind !== 'tank' && vehicle.kind !== 'mech') this.player.yaw += wrap(yaw - this.lastVehicleYaw)
+    // (a fighter steers towards the view instead, so the view doesn't turn with it)
+    if (vehicle.kind !== 'tank' && vehicle.kind !== 'mech' && vehicle.kind !== 'fighter') this.player.yaw += wrap(yaw - this.lastVehicleYaw)
     this.lastVehicleYaw = yaw
     // We ride along: our position is the seat (what others use for range checks, where we get out)
     const seat = vehicle.object.localToWorld(this.seatEye(vehicle, this.seat))
     this.player.position.copy(seat)
     this.camera.rotation.order = 'YXZ'
-    if (this.cameraMode === 'inside' || this.seat !== 0) {
+    if (vehicle.kind === 'fighter' && this.cameraMode === 'inside') {
+      // In the cockpit the view is the craft's own (it rolls and pitches with it)
+      this.camera.position.copy(seat)
+      this.camera.quaternion.copy(vehicle.object.quaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI))
+    } else if (this.cameraMode === 'inside' || this.seat !== 0) {
       this.camera.position.copy(seat)
       this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
+    } else if (vehicle.kind === 'fighter') {
+      // Chase: behind and above, looking where we're steering (the craft swings round to follow)
+      const pitch = THREE.MathUtils.clamp(this.player.pitch, -1.35, 1.35)
+      this.player.pitch = pitch
+      const forward = new THREE.Vector3(-Math.sin(this.player.yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(this.player.yaw) * Math.cos(pitch))
+      const eye = vehicle.object.position.clone().add(new THREE.Vector3(0, 1.6, 0)).addScaledVector(forward, -17).add(new THREE.Vector3(0, 3.6, 0))
+      eye.y = Math.max(eye.y, heightAt(eye.x, eye.z) + 1)
+      this.camera.position.lerp(eye, Math.min(1, dt * 12))
+      this.camera.rotation.set(pitch, this.player.yaw, 0)
     } else if (vehicle.kind === 'heli') {
       const back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)).multiplyScalar(18)
       const p = vehicle.object.position
@@ -1944,6 +2006,144 @@ export class BattlefieldGame {
     p.set(x, this.heliAltitude, z)
     heli.object.rotation.set(this.heliPitch, yaw, this.heliRoll)
     setGameState({ rotorRpm: Math.round(heli.spin * 10) })
+  }
+
+  /**
+   * Space fighter flight. Below FIGHTER_HOVER it hangs on its lift jets: SPACE climbs, otherwise it settles gently
+   * (on the ground it sits on its legs). W/S set the throttle, Shift boosts. The craft swings its nose towards
+   * where you look (at FIGHTER_TURN rad/s) and banks into turns; A/D roll it further. It flies from the ground to
+   * the edge of space (FIGHTER_CEILING) and bounces off the capital ships and asteroids up there.
+   */
+  private updateFighter(ship: Vehicle, dt: number) {
+    const pose = ship.object
+    const p = pose.position
+    const throttleInput = (this.input.forward ? 1 : 0) - (this.input.back ? 1 : 0)
+    this.fighterThrottle = THREE.MathUtils.clamp(this.fighterThrottle + throttleInput * dt * 0.7, 0, 1)
+    const boosting = this.input.sprint && this.fighterThrottle > 0.2
+    const targetSpeed = boosting ? FIGHTER_BOOST : this.fighterThrottle * FIGHTER_CRUISE
+    ship.spin += THREE.MathUtils.clamp(targetSpeed - ship.spin, -FIGHTER_ACCEL * 1.4 * dt, FIGHTER_ACCEL * (boosting ? 1.6 : 1) * dt)
+    const speed = Math.max(0, ship.spin)
+    const flying = speed > FIGHTER_HOVER
+    const ground = this.fleet.restHeight(ship, p.x, p.z)
+    const onGround = p.y - ground < FIGHTER_LANDED + 0.05
+
+    // Where we want the nose: along the view (level while hovering on the lift jets)
+    const lookPitch = flying ? THREE.MathUtils.clamp(this.player.pitch, -1.3, 1.3) : 0
+    const want = new THREE.Vector3(Math.sin(this.player.yaw + Math.PI) * Math.cos(lookPitch), Math.sin(lookPitch), Math.cos(this.player.yaw + Math.PI) * Math.cos(lookPitch))
+    const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(pose.quaternion)
+    const angle = nose.angleTo(want)
+    const turn = FIGHTER_TURN * (flying ? 1 : 0.7) * dt * (onGround && speed < 2 ? 0.35 : 1)
+    if (angle > 1e-4) {
+      const axis = new THREE.Vector3().crossVectors(nose, want)
+      if (axis.lengthSq() < 1e-8) axis.set(0, 1, 0)
+      nose.applyAxisAngle(axis.normalize(), Math.min(angle, turn))
+    }
+    const yaw = Math.atan2(nose.x, nose.z)
+    const pitch = onGround && !flying ? 0 : -Math.asin(THREE.MathUtils.clamp(nose.y, -1, 1))
+    // Bank into the turn (and further with A/D)
+    const yawRate = wrap(yaw - pose.rotation.y) / Math.max(dt, 1e-3)
+    const rollInput = (this.input.left ? 1 : 0) - (this.input.right ? 1 : 0)
+    const bank = onGround ? 0 : THREE.MathUtils.clamp(-yawRate * (flying ? 0.55 : 0.25) - rollInput * 0.7, -1.2, 1.2)
+    const roll = THREE.MathUtils.lerp(pose.rotation.z, bank, Math.min(1, dt * 3.5))
+
+    // Lift jets: SPACE climbs; without it a hovering craft sinks gently, a flying one holds its line
+    const liftTarget = this.input.jump ? 14 : flying ? 0 : -4
+    this.fighterVy = THREE.MathUtils.lerp(this.fighterVy, liftTarget, Math.min(1, dt * 2.5))
+    const move = flying ? nose.clone().multiplyScalar(speed) : new THREE.Vector3(nose.x, 0, nose.z).normalize().multiplyScalar(speed)
+    let x = p.x + move.x * dt, y = p.y + (move.y + this.fighterVy) * dt, z = p.z + move.z * dt
+    x = THREE.MathUtils.clamp(x, -WORLD_LIMIT, WORLD_LIMIT)
+    z = THREE.MathUtils.clamp(z, -WORLD_LIMIT, WORLD_LIMIT)
+    const floor = this.fleet.restHeight(ship, x, z)
+    if (y < floor) {
+      // Touching down: fast and steep scrapes it along and bleeds speed; slow settles it on its legs
+      y = floor
+      this.fighterVy = Math.max(0, this.fighterVy)
+      if (flying) ship.spin *= Math.pow(0.35, dt)
+    }
+    y = Math.min(y, FIGHTER_CEILING)
+    const pushed = this.space.pushOut(new THREE.Vector3(x, y, z), fighterSpec(ship.team).radius)
+    if (pushed) { x = pushed.x; y = pushed.y; z = pushed.z; ship.spin *= Math.pow(0.2, dt) }
+    p.set(x, y, z)
+    pose.rotation.set(pitch, yaw, roll)
+    pose.updateMatrixWorld()
+    setGameState({ speedKmh: Math.round(speed * 3.6), altitude: Math.round(y - heightAt(x, z)), boost: boosting })
+  }
+
+  /**
+   * The fighter's weapons. LMB: the nose lasers, straight ahead from the wing roots in turn. RMB: a missile from the
+   * pods — homing if the nose has been held on an enemy aircraft for FIGHTER_LOCK_TIME, otherwise straight ahead.
+   */
+  private updateFighterGuns(ship: Vehicle, dt: number) {
+    this.fighterGunCooldown = Math.max(0, this.fighterGunCooldown - dt)
+    const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(ship.object.quaternion)
+    const centre = ship.object.localToWorld(new THREE.Vector3(0, 1.5, 3))
+    // Where the guns point, for the sight on screen
+    const ahead = centre.clone().addScaledVector(nose, 200).project(this.camera)
+    const onScreen = ahead.z < 1 && Math.abs(ahead.x) < 1.2 && Math.abs(ahead.y) < 1.2
+    // Missile lock: the enemy aircraft nearest the nose, if it stays in the cone
+    let best: Vehicle | null = null
+    let bestAngle = FIGHTER_LOCK_CONE
+    for (const vehicle of this.fleet.vehicles) {
+      if (vehicle === ship || !this.hostileAircraft(vehicle)) continue
+      const to = this.aimPoint(vehicle).sub(centre)
+      const distance = to.length()
+      if (distance > FIGHTER_MISSILE_RANGE || distance < 8) continue
+      const a = nose.angleTo(to)
+      if (a < bestAngle) { best = vehicle; bestAngle = a }
+    }
+    if (best && best === this.fighterLock.target) this.fighterLock.time += dt
+    else this.fighterLock = { target: best, time: 0 }
+    const progress = best ? Math.min(1, this.fighterLock.time / FIGHTER_LOCK_TIME) : 0
+    let lx = -1, ly = -1
+    if (best) {
+      const screen = this.aimPoint(best).project(this.camera)
+      lx = (screen.x + 1) / 2
+      ly = (1 - screen.y) / 2
+    }
+    const now = performance.now()
+    const ready = Math.min(1, 1 - (this.fighterMissileAt - now) / (FIGHTER_MISSILE_GAP * 1000))
+    setGameState({
+      gunX: onScreen ? Math.round(((ahead.x + 1) / 2) * 400) / 400 : -1,
+      gunY: onScreen ? Math.round(((1 - ahead.y) / 2) * 400) / 400 : -1,
+      cannon: Math.round(Math.max(0, ready) * 50) / 50,
+      lock: progress, lockX: Math.round(lx * 400) / 400, lockY: Math.round(ly * 400) / 400,
+    })
+    this.audio.lockTone(best ? progress : -1, now / 1000)
+
+    if (this.mouse.aiming && now >= this.fighterMissileAt) {
+      this.fighterMissileAt = now + FIGHTER_MISSILE_GAP * 1000
+      const pod = ship.object.localToWorld(fighterSpec(ship.team).pods[Math.floor(now / 100) % 2].clone())
+      this.audio.shot('launch', pod)
+      if (best && progress >= 1) {
+        const target = best
+        this.match.net.sendMissile(target.id, [pod.x, pod.y, pod.z])
+        this.projectiles.missile(pod, () => (target.destroyed ? null : this.aimPoint(target)))
+        setGameState({ message: `Missile locked on the enemy ${label(target)}!` })
+      } else {
+        const hit = new THREE.Raycaster(pod, nose, 0, ROCKET_RANGE).intersectObjects(this.shootTargets(), true)[0]
+        const to = hit?.point ?? pod.clone().addScaledVector(nose, ROCKET_RANGE)
+        this.match.net.sendFire('rocket', [pod.x, pod.y, pod.z], [to.x, to.y, to.z])
+        this.projectiles.missile(pod, () => to, () => this.explodeAt(to, 'rocket'), false)
+      }
+      this.fighterLock = { target: null, time: 0 }
+    }
+
+    if (!this.mouse.shooting || this.fighterGunCooldown > 0) return
+    this.fighterGunCooldown = FIGHTER_LASER.fireRate
+    const muzzle = this.fleet.carMuzzle(ship, new THREE.Vector3())
+    ship.gatlingSpin++
+    const targets = this.shootTargets()
+    const hits = new THREE.Raycaster(muzzle.clone().addScaledVector(nose, 0.5), nose, 0, FIGHTER_LASER.range).intersectObjects(targets, true)
+    const end = hits[0]?.point.clone() ?? muzzle.clone().addScaledVector(nose, FIGHTER_LASER.range)
+    this.projectiles.round('bolt', muzzle, end, FIGHTER_LASER.color)
+    this.projectiles.muzzleFlash(muzzle, nose, 1.1)
+    this.audio.shot('plasma', null)
+    ship.gunRecoil = 1
+    this.match.net.sendShot([end.x, end.y, end.z], FIGHTER_LASER.id)
+    if (hits[0]) {
+      this.applyImpact(hits[0], nose, true)
+      this.reportHit(hits[0].object, FIGHTER_LASER.id)
+    }
   }
 
   /** Arcade battle car: W/S throttle and reverse, A/D steer, SPACE brakes; it follows the ground and bumps off obstacles. */
@@ -2272,7 +2472,8 @@ export class BattlefieldGame {
         pose.rotation.x = pose.rotation.z = 0
         continue
       }
-      if (vehicle.kind !== 'heli') {
+      if (vehicle.kind === 'fighter') vehicle.spin = 0
+      if (vehicle.kind !== 'heli' && vehicle.kind !== 'fighter') {
         // A car rolls to a stop where it was left (a tank's tracks hold it)
         if (vehicle.kind === 'tank') vehicle.spin = 0
         if (Math.abs(vehicle.spin) > 0.05) {
@@ -2496,9 +2697,9 @@ export class BattlefieldGame {
     return vehicle.object.localToWorld(new THREE.Vector3(0, 1.7, 0.9))
   }
 
-  /** A helicopter with an enemy aboard (anyone may fly anyone's helicopter, so it's about who is inside). */
+  /** An aircraft (helicopter or fighter) with an enemy aboard (anyone may fly anyone's, so it's about who is inside). */
   private hostileAircraft(vehicle: Vehicle) {
-    return vehicle.kind === 'heli' && !vehicle.destroyed && vehicle.occupants.some((id) => id && id !== this.match.you && this.teamOf(id) !== this.team && !this.remotes.get(id)?.info.dead)
+    return (vehicle.kind === 'heli' || vehicle.kind === 'fighter') && !vehicle.destroyed && vehicle.occupants.some((id) => id && id !== this.match.you && this.teamOf(id) !== this.team && !this.remotes.get(id)?.info.dead)
   }
 
   /**
@@ -2661,7 +2862,7 @@ export class BattlefieldGame {
     const vehicle = this.vehicle
     setGameState({
       current: this.arsenal.kind,
-      carGun: (vehicle?.kind === 'car' || vehicle?.kind === 'heli') && this.seat === 0,
+      carGun: (vehicle?.kind === 'car' || vehicle?.kind === 'heli' || vehicle?.kind === 'fighter') && this.seat === 0,
       grenades: this.arsenal.reserve.grenade ?? 0,
       vehicleHp: vehicle ? Math.round((vehicle.hp / VEHICLE_MAX_HP[vehicle.kind]) * 100) / 100 : 1,
       weaponName: def?.name ?? '',
@@ -2688,6 +2889,7 @@ export class BattlefieldGame {
 
       this.updateRemotes(realDt)
       this.updateShadowArea()
+      this.space.update(dt, this.camera.position)
       this.water.update(time)
       this.updateFlashes()
       this.bases.blue.gem.update(time)
@@ -2745,6 +2947,7 @@ export class BattlefieldGame {
       if (driving?.kind === 'tank') this.updateTankGun(driving, dt)
       if (driving?.kind === 'mech') this.updateMechGun(driving, dt)
       if (driving?.kind === 'heli') this.updateHeliGun(driving, dt)
+      if (driving?.kind === 'fighter') this.updateFighterGuns(driving, dt)
       const scoped = this.updateZoom(realDt, canShoot)
       const launcherInHand = this.updateLauncher(realDt, canShoot)
       if (canShoot && !launcherInHand) {
@@ -2845,6 +3048,10 @@ export class BattlefieldGame {
         if (v.spin > 2) sources.push({ id: v.id, kind: 'rotor', position: v.object.position.clone().add(new THREE.Vector3(0, 3, 0)), rate: v.spin / MAX_ROTOR_RPM, own })
         continue
       }
+      if (v.kind === 'fighter') {
+        if (own || driverOf(v)) sources.push({ id: v.id, kind: 'jet', position: v.object.position.clone().add(new THREE.Vector3(0, 1.5, 0)), rate: Math.min(1, 0.12 + v.spin / FIGHTER_BOOST), own })
+        continue
+      }
       if (!own && !driverOf(v)) continue
       const heavy = v.kind === 'tank' || v.kind === 'mech'
       sources.push({ id: v.id, kind: heavy ? 'tank' : 'car', position: v.object.position.clone().add(new THREE.Vector3(0, v.kind === 'mech' ? 5 : 1, 0)), rate: Math.min(1, Math.abs(v.spin) / (v.kind === 'tank' ? TANK_MAX_SPEED : v.kind === 'mech' ? MECH_RUN : CAR_MAX_SPEED)), own })
@@ -2863,7 +3070,7 @@ export class BattlefieldGame {
     radar.x = me.x
     radar.z = me.z
     radar.yaw = Math.atan2(-view.x, -view.z)
-    radar.range = this.vehicle?.kind === 'heli' ? 320 : 180
+    radar.range = this.vehicle?.kind === 'fighter' ? 520 : this.vehicle?.kind === 'heli' ? 320 : 180
     const blips: RadarBlip[] = []
     const recently = (id: string | null) => !!id && now - (this.remotes.get(id)?.lastFiredAt ?? 0) < 3000
     for (const team of ['blue', 'red'] as const) {
@@ -2880,7 +3087,7 @@ export class BattlefieldGame {
       const friendly = crew.some((id) => this.teamOf(id) === this.team)
       const p = v.object.position
       if (crew.length && !friendly) {
-        const flying = v.kind === 'heli' && p.y - this.fleet.restHeight(v, p.x, p.z) > 3
+        const flying = (v.kind === 'heli' || v.kind === 'fighter') && p.y - this.fleet.restHeight(v, p.x, p.z) > 3
         if (!flying && Math.hypot(p.x - me.x, p.z - me.z) > 70 && !crew.some(recently)) continue
       }
       blips.push({ x: p.x, z: p.z, kind: v.kind, team: crew.length ? (friendly ? this.team : other(this.team)) : null, yaw: v.object.rotation.y, empty: !crew.length })
@@ -2905,6 +3112,7 @@ export class BattlefieldGame {
     for (const remote of this.remotes.values()) remote.avatar?.dispose()
     this.graphics.dispose()
     this.sky.dispose()
+    this.space.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }

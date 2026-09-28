@@ -12,8 +12,8 @@ export class RoomController {
   }
 
   @Post()
-  async create(@Headers('authorization') authorization: string | undefined, @Body() body: Record<string, unknown>) {
-    return this.rooms.create(body, await this.auth.authenticate(authorization))
+  async create(@Headers('authorization') authorization: string | undefined, @Headers('origin') origin: string | undefined, @Body() body: Record<string, unknown>) {
+    return this.rooms.create(body, await this.auth.authenticate(authorization), origin)
   }
 
   @Post(':id/join')

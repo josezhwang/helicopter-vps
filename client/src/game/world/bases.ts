@@ -26,6 +26,43 @@ export interface BaseObjects {
 
 const noRaycast = () => {}
 
+/**
+ * Sci-fi grade for the base: every surface turned to cool gunmetal armour plate (the photo detail kept, its
+ * colour drained and cooled), and glowing team-coloured light strips run along the walls at two heights.
+ */
+function sciFiMaterial(source: THREE.Material, team: Team, floor: number): THREE.Material {
+  const material = source.clone()
+  if (!(material instanceof THREE.MeshStandardMaterial)) return material
+  material.metalness = Math.max(material.metalness, 0.35)
+  material.roughness = Math.min(material.roughness, 0.7)
+  const accent = new THREE.Color(TEAM_ACCENT[team]).multiplyScalar(2.2)
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uAccent = { value: accent }
+    shader.uniforms.uFloor = { value: floor }
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vBaseWorld;\nvarying vec3 vBaseNormal;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvBaseWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvBaseNormal = normalize(mat3(modelMatrix) * objectNormal);')
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 uAccent;\nuniform float uFloor;\nvarying vec3 vBaseWorld;\nvarying vec3 vBaseNormal;')
+      .replace('#include <map_fragment>', /* glsl */ `#include <map_fragment>
+{
+  // Drain and cool the photo colours: gunmetal plating that keeps its grime and panel detail
+  float lum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+  diffuseColor.rgb = mix(vec3(lum) * vec3(0.8, 0.86, 0.92), diffuseColor.rgb, 0.18) * 1.05;
+}`)
+      .replace('#include <emissivemap_fragment>', /* glsl */ `#include <emissivemap_fragment>
+{
+  // Light strips on the walls (vertical faces) at knee and head height above the base floor
+  float wall = 1.0 - smoothstep(0.25, 0.5, abs(vBaseNormal.y));
+  float h = vBaseWorld.y - uFloor;
+  float strip = smoothstep(0.07, 0.0, abs(h - 0.55)) + smoothstep(0.05, 0.0, abs(h - 2.6)) * 0.8;
+  totalEmissiveRadiance += uAccent * strip * wall;
+}`)
+  }
+  material.customProgramCacheKey = () => `aerium-base-scifi-${team}`
+  return material
+}
+
 /** A box given in the base's frame, as a world-space box (the base only turns in quarter turns, so it stays axis-aligned). */
 function toWorldBox(group: THREE.Object3D, min: THREE.Vector3Tuple, max: THREE.Vector3Tuple): THREE.Box3 {
   group.updateMatrixWorld(true)
@@ -53,7 +90,8 @@ export function createBase(team: Team, colliders: THREE.Box3[] = []): BaseObject
   // Team flags either side of the gate, so the two identical bases can be told apart from afar
   const flags = new THREE.Group()
   const poleMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: 0.5, metalness: 0.6 })
-  const clothMat = new THREE.MeshStandardMaterial({ color: TEAM_ACCENT[team], roughness: 0.8, side: THREE.DoubleSide })
+  // Holo banners in the team colour
+  const clothMat = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: TEAM_ACCENT[team], emissiveIntensity: 2.4, roughness: 0.3, side: THREE.DoubleSide, transparent: true, opacity: 0.85 })
   for (const x of [-14, 14]) {
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 9, 8), poleMat)
     pole.position.set(x, 4.5, 49)
@@ -70,12 +108,19 @@ export function createBase(team: Team, colliders: THREE.Box3[] = []): BaseObject
       fetch(COLLIDERS_URL).then((r) => r.json() as Promise<Array<{ min: THREE.Vector3Tuple; max: THREE.Vector3Tuple }>>),
     ])
     const model = gltf.scene.clone(true)
+    const gradedMaterials = new Map<THREE.Material, THREE.Material>()
     model.traverse((node) => {
       const mesh = node as THREE.Mesh
       if (!mesh.isMesh) return
       mesh.castShadow = true
       mesh.receiveShadow = true
-      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(toStandardMaterial) : toStandardMaterial(mesh.material)
+      const grade = (m: THREE.Material) => {
+        // One graded material per source material, so the base still merges into a few draw calls
+        let graded = gradedMaterials.get(m)
+        if (!graded) gradedMaterials.set(m, (graded = sciFiMaterial(toStandardMaterial(m), team, group.position.y)))
+        return graded
+      }
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(grade) : grade(mesh.material)
     })
     group.add(model)
     mergeStaticMeshes(group, new Set([...flags.children, gem.group]))

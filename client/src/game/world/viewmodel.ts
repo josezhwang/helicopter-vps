@@ -48,7 +48,7 @@ export class Viewmodel {
         model.traverse((node) => {
           node.frustumCulled = false
         })
-        const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTexture, color: kind === 'plasma' ? 0x8dff9a : 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false }))
+        const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTexture, color: kind === 'plasma' ? 0xd28cff : 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false }))
         flash.position.copy(prop.tip)
         flash.scale.setScalar(kind === 'handgun' ? 0.22 : 0.4)
         flash.renderOrder = 1001

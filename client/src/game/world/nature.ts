@@ -34,7 +34,7 @@ const compose = (x: number, y: number, z: number, euler: THREE.Euler, sx: number
 type RockVariant = 'rock1' | 'rock2' | 'rock3' | 'rock4'
 const ROCK_VARIANTS: RockVariant[] = ['rock1', 'rock2', 'rock3', 'rock4']
 /** The rune stone is tall and thin; keep it a landmark rather than a tower. */
-const ROCK_HEIGHT_FACTOR: Record<RockVariant, number> = { rock1: 1, rock2: 1, rock3: 1, rock4: 0.45 }
+const ROCK_HEIGHT_FACTOR: Record<RockVariant, number> = { rock1: 1, rock2: 1, rock3: 1, rock4: 1.2 }
 
 /** Deterministic (same on every client): big rocks are mossy piles, boulders, or the odd rune stone. */
 function rockVariant(index: number, scale: number): RockVariant {
@@ -185,9 +185,12 @@ export function createRocks(circles?: Array<{ x: number; z: number; r: number }>
 export function createBushes(circles?: Array<{ x: number; z: number; r: number }>, avoid?: (x: number, z: number) => boolean): THREE.Group {
   const group = new THREE.Group()
   const rng = mulberry32(4242)
-  const bushMat = new THREE.MeshStandardMaterial({ color: 0x5d7a3d, roughness: 1 })
+  // Alien scrub: violet-grey mounds
+  const bushMat = new THREE.MeshStandardMaterial({ color: 0x6a5578, roughness: 1 })
   const geo = new THREE.IcosahedronGeometry(1, 0)
   const bushes: THREE.Matrix4[] = []
+  const shrubSpots: THREE.Matrix4[] = []
+  const glowSpots: THREE.Matrix4[] = []
 
   for (let i = 0; i < 400; i++) {
     const x = (rng() * 2 - 1) * HALF_WORLD * 0.97
@@ -201,10 +204,23 @@ export function createBushes(circles?: Array<{ x: number; z: number; r: number }
     const turn = rng() * Math.PI
     if (avoid?.(x, z)) continue
     bushes.push(compose(x, h + scale * 0.5, z, new THREE.Euler(0, turn, 0), scale * 1.4, scale * 0.8, scale * 1.4))
-    circles?.push({ x, z, r: scale * 0.95 })
+    // Every third one is a clump of glowing plants (walk-through), the rest violet coral shrubs
+    const glow = bushes.length % 3 === 0
+    ;(glow ? glowSpots : shrubSpots).push(compose(x, h - 0.05, z, new THREE.Euler(0, turn, 0), scale * (glow ? 1.7 : 1.3), scale * (glow ? 1.7 : 1.3), scale * (glow ? 1.7 : 1.3)))
+    if (!glow) circles?.push({ x, z, r: scale * 0.95 })
   }
 
-  group.add(instanced(geo, bushMat, bushes, true))
+  // Plain mounds until the plant models arrive
+  const standIn = instanced(geo, bushMat, bushes, true)
+  group.add(standIn)
+  void Promise.all([loadModel('/models/alien_shrub.glb'), loadModel('/models/glow_plant.glb')]).then(([shrub, glowPlant]) => {
+    const a = firstMeshGeometry(shrub.scene), b = firstMeshGeometry(glowPlant.scene)
+    if (!a || !b) return
+    group.add(instanced(a.geometry, toStandardMaterial(a.material), shrubSpots, true, true))
+    group.add(instanced(b.geometry, toStandardMaterial(b.material), glowSpots, false, true))
+    standIn.removeFromParent()
+    standIn.dispose()
+  }).catch((error) => console.error('[nature] alien plants failed to load:', error))
   return group
 }
 
@@ -263,7 +279,7 @@ export function createGrass(exclude: (x: number, z: number) => boolean): GrassFi
     const source = part.material as THREE.MeshStandardMaterial
     // Lambert + alpha test: the cheapest shading that still lets the blades catch the sun
     // Lifted a little so clumps blend with the terrain instead of reading as dark specks from afar
-    const material = new THREE.MeshLambertMaterial({ map: source.map ?? null, color: 0xf2ffd8, emissive: 0x1c2a12, alphaTest: 0.45, side: THREE.DoubleSide })
+    const material = new THREE.MeshLambertMaterial({ map: source.map ?? null, color: 0xffffff, emissive: 0x0c1a18, alphaTest: 0.45, side: THREE.DoubleSide })
     for (const chunk of chunks.values()) {
       // Two halves per chunk: the second half is only drawn close to the camera
       for (const [half, fullOnly] of [[0, false], [1, true]] as const) {

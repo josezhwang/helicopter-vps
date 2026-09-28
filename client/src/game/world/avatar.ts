@@ -9,17 +9,19 @@ import { WEAPONS, type WeaponKind } from './weapons'
 export const TEAM_COLOR: Record<Team, number> = { blue: 0x2e6fbd, red: 0xb03a2e }
 /** The robots' eye light in each team's colour. */
 const VISOR_COLOR: Record<Team, number> = { blue: 0x3fa4ff, red: 0xff3a24 }
+/** Armour paint per team (multiplied into the soldier's light-grey team plates). */
+const TEAM_PAINT: Record<Team, number> = { blue: 0x4a86d8, red: 0xd8503f }
 
 /**
- * Every player is a combat robot: the "Security Bot" of Blender Studio's open film Charge (CC-BY 4.0), with
- * baked film textures and Quaternius' Universal Animation Library (CC0) moved onto its skeleton. The legs walk,
- * run and sprint with the player's speed while the upper body holds the gun up and leans with the aim; it
- * flinches when hit, throws grenades, and falls when it dies. Its eye glows in the team colour.
+ * Every player is an armoured space soldier: "Security Cyborg" by fletcherkinnear (CC-BY 4.0), with its helmet
+ * and armour plates painted in the team colour, and Quaternius' Universal Animation Library (CC0) retargeted
+ * onto its skeleton. The legs walk, run and sprint with the player's speed while the upper body holds the gun
+ * up and leans with the aim; it flinches when hit, throws grenades, and falls when it dies. Its visor glows.
  */
-let robotUrl = '/models/robot.glb'
-/** Weak PCs get the lighter robot (a third of the triangles, smaller textures). Set before the first avatar. */
+let robotUrl = '/models/soldier.glb'
+/** Weak PCs get the lighter soldier (under half the triangles, smaller textures). Set before the first avatar. */
 export function setRobotDetail(lite: boolean) {
-  if (!robotAsset) robotUrl = lite ? '/models/robot_lite.glb' : '/models/robot.glb'
+  if (!robotAsset) robotUrl = lite ? '/models/soldier_lite.glb' : '/models/soldier.glb'
 }
 const ROBOT_HEIGHT = 2.0
 /** Ground speeds (m/s) at which the walk, run and sprint cycles look right. */
@@ -39,7 +41,7 @@ const DEATH_FALL = 2.3
 const DEATH_LIE = 1.6
 const DEATH_SINK = 0.8
 /** Bones the upper-body layer (aiming, flinching, throwing) owns; the legs' clips own the rest. */
-const UPPER_BODY = /^(spine_02|spine_roll|spine_03|neck_yaw|neck_01|Head|clavicle_|shoulder_|upperarm_|lowerarm_|hand_|thumb_|index_|ring_|grip_)/
+const UPPER_BODY = /^(spine_02|spine_roll|spine_03|neck_yaw|neck_01|Head|clavicle_|shoulder_|upperarm_|lowerarm_|hand_|thumb_|index_|middle_|ring_|pinky_|grip_)/
 
 export interface Avatar {
   group: THREE.Group
@@ -195,6 +197,9 @@ function teamMaterial(source: THREE.Material, team: Team): THREE.Material {
       if (material.name === 'visor') {
         material.emissive = new THREE.Color(VISOR_COLOR[team])
         material.emissiveIntensity = 6
+      } else if (material.name === 'teampaint') {
+        // The armour's team-coloured plates (helmet, shoulders)
+        material.color = new THREE.Color(TEAM_PAINT[team])
       } else if (material.name === 'robot') {
         material.color = new THREE.Color(1, 1, 1).lerp(new THREE.Color(TEAM_COLOR[team]), 0.14)
       }

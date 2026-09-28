@@ -29,6 +29,8 @@ const AMMO_ROW = { x: 24.5, z0: -40, dz: 3.5, types: ['556', '556', '762', '762'
 const TANKS: Array<[number, number]> = [[-30, 68], [-44, 68]]
 /** Two combat mechs per base, either side of the gate outside the walls (base frame, facing out). */
 const MECHS: Array<[number, number]> = [[-58, 72], [62, 72]]
+/** Two space fighters per base on pads outside the far wall (base frame). */
+const FIGHTERS: Array<[number, number]> = [[-74, 24], [-74, -12]]
 const HELIS = Array.from({ length: 5 }, (_, i) => [34, -42 + i * 14] as [number, number])
 const CARS = Array.from({ length: 5 }, (_, i) => [24 + i * 6, 66] as [number, number])
 /** Explosive barrels: two by each gate, one by the fuel tanker (base frame). */
@@ -133,14 +135,15 @@ export function initialItems(): Item[] {
   return items
 }
 
-export type VehicleKindId = 'heli' | 'car' | 'tank' | 'mech'
-export const VEHICLE_MAX_HP: Record<VehicleKindId, number> = { heli: 450, car: 700, tank: 2000, mech: 1600 }
+export type VehicleKindId = 'heli' | 'car' | 'tank' | 'mech' | 'fighter'
+export const VEHICLE_MAX_HP: Record<VehicleKindId, number> = { heli: 450, car: 700, tank: 2000, mech: 1600, fighter: 380 }
 /** Where each vehicle is parked at the start (world XZ): used when nobody has moved it yet. */
 export const VEHICLE_HOMES = new Map<string, [number, number]>(TEAMS.flatMap((team) => [
   ...HELIS.map((spot, i) => [`${team}-heli-${i}`, baseToWorld(team, ...spot)] as const),
   ...CARS.map((spot, i) => [`${team}-car-${i}`, baseToWorld(team, ...spot)] as const),
   ...TANKS.map((spot, i) => [`${team}-tank-${i}`, baseToWorld(team, ...spot)] as const),
   ...MECHS.map((spot, i) => [`${team}-mech-${i}`, baseToWorld(team, ...spot)] as const),
+  ...FIGHTERS.map((spot, i) => [`${team}-fighter-${i}`, baseToWorld(team, ...spot)] as const),
 ]))
 
 /** Every explosive barrel (world XZ): by the bases' gates and tankers, and one per outpost. */

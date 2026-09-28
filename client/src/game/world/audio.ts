@@ -31,6 +31,15 @@ const SHOTS: Record<Exclude<ShotSound, 'plasma' | 'launch'>, ShotRecipe> = {
   cannon: { crack: [0.8, 1500, 0.08], body: [1.25, 480, 0.5], thump: [1.5, 42, 0.5], tail: [0.75, 2.4], ref: 75 },
 }
 
+/** The energy layer on each gun class: start and end pitch (Hz), level, decay (s). */
+const ZAP: Partial<Record<ShotSound, [number, number, number, number]>> = {
+  pistol: [2600, 700, 0.1, 0.07],
+  rifle: [2200, 420, 0.12, 0.09],
+  heavy: [1500, 260, 0.14, 0.12],
+  sniper: [3400, 240, 0.2, 0.3],
+  gatling: [1800, 500, 0.08, 0.05],
+}
+
 /** A looping sound following one vehicle (rotor thump, engine growl). */
 interface Loop {
   id: string | null
@@ -42,7 +51,7 @@ interface Loop {
 
 export interface LoopSource {
   id: string
-  kind: 'rotor' | 'car' | 'tank'
+  kind: 'rotor' | 'car' | 'tank' | 'jet'
   position: THREE.Vector3
   /** Rotor 0..1 of full speed; engines: speed 0..1 of top speed. */
   rate: number
@@ -60,6 +69,7 @@ export class GameAudio {
   private right = new THREE.Vector3(1, 0, 0)
   private rotors: Loop[] = []
   private engines: Loop[] = []
+  private jets: Loop[] = []
   private lockVoice: { osc: OscillatorNode; gain: GainNode } | null = null
   private lastImpactAt = 0
 
@@ -99,6 +109,7 @@ export class GameAudio {
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
     this.rotors = [0, 1, 2].map(() => this.rotorLoop(ctx))
     this.engines = [0, 1, 2].map(() => this.engineLoop(ctx))
+    this.jets = [0, 1].map(() => this.jetLoop(ctx))
     this.wind(ctx)
   }
 
@@ -220,6 +231,9 @@ export class GameAudio {
     this.tone(ctx, out.input, out.t, 'sine', r.thump[1] * 1.8, r.thump[1] * 0.6, r.thump[0], 0.002, r.thump[2])
     // The report rolling back off the hills
     this.burst(ctx, out.input, out.t + 0.02, 'lowpass', 520, r.tail[0], 0.03, r.tail[1])
+    // Sci-fi arms: a magnetic "zap" riding on each shot (rail-assisted rounds), deeper for the heavier guns
+    const zap = ZAP[kind]
+    if (zap) this.tone(ctx, out.input, out.t, 'sawtooth', zap[0] * vary, zap[1], zap[2], 0.001, zap[3])
   }
 
   /** Something blew up (size ~1 for a grenade, 2 for a vehicle). */
@@ -404,6 +418,38 @@ export class GameAudio {
     }
   }
 
+  /** A fighter's engines: a roar of air that deepens and swells with thrust, over a rising turbine whine. */
+  private jetLoop(ctx: AudioContext): Loop {
+    const { out, pan, air } = this.loopOut(ctx)
+    const source = this.noiseSource(ctx)
+    const roar = this.filter(ctx, 'lowpass', 500, 0.7)
+    const body = this.filter(ctx, 'bandpass', 180, 0.8)
+    const roarGain = ctx.createGain()
+    roarGain.gain.value = 0.5
+    source.connect(roar).connect(roarGain).connect(out)
+    source.connect(body).connect(out)
+    const whine = ctx.createOscillator(), whine2 = ctx.createOscillator()
+    whine.type = 'sawtooth'
+    whine2.type = 'sine'
+    const whineFilter = this.filter(ctx, 'bandpass', 2000, 4)
+    const whineGain = ctx.createGain()
+    whineGain.gain.value = 0.03
+    whine.connect(whineFilter).connect(whineGain).connect(out)
+    whine2.connect(whineGain)
+    source.start(); whine.start(); whine2.start()
+    return {
+      id: null, out, pan, air,
+      set: (rate, t) => {
+        roar.frequency.setTargetAtTime(350 + rate * 2600, t, 0.25)
+        roarGain.gain.setTargetAtTime(0.25 + rate * 0.75, t, 0.25)
+        whine.frequency.setTargetAtTime(900 + rate * 2400, t, 0.4)
+        whine2.frequency.setTargetAtTime(1800 + rate * 3200, t, 0.4)
+        whineFilter.frequency.setTargetAtTime(1500 + rate * 3000, t, 0.4)
+        whineGain.gain.setTargetAtTime(0.02 + rate * 0.03, t, 0.3)
+      },
+    }
+  }
+
   /** A combustion engine (two buzzing oscillators through a filter that opens with the revs) and, for tanks, track clatter. */
   private engineLoop(ctx: AudioContext): Loop {
     const { out, pan, air } = this.loopOut(ctx)
@@ -475,7 +521,8 @@ export class GameAudio {
       }
     }
     assign(this.rotors, sources.filter((s) => s.kind === 'rotor'), 40, (s) => 0.9 * Math.min(1, s.rate * 1.3))
-    assign(this.engines, sources.filter((s) => s.kind !== 'rotor'), 15, (s) => (s.kind === 'tank' ? 0.55 : 0.4) * (0.45 + 0.55 * s.rate))
+    assign(this.engines, sources.filter((s) => s.kind === 'car' || s.kind === 'tank'), 15, (s) => (s.kind === 'tank' ? 0.55 : 0.4) * (0.45 + 0.55 * s.rate))
+    assign(this.jets, sources.filter((s) => s.kind === 'jet'), 60, (s) => 0.35 + 0.55 * s.rate)
   }
 
   dispose() {

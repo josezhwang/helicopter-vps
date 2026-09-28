@@ -202,8 +202,9 @@ export class Multiplayer {
     this.send({ type: 'shot', to, w: weapon })
   }
 
-  sendMissile(target: string) {
-    this.send({ type: 'missile', target })
+  /** A homing missile at an aircraft (from the shoulder, or from a fighter's pod at `from`). */
+  sendMissile(target: string, from?: Vec3) {
+    this.send({ type: 'missile', target, ...(from ? { from } : {}) })
   }
 
   sendTake(id: string, mode: 'weapon' | 'ammo', want: number) {

@@ -61,9 +61,10 @@ const LAYERS = ['grass', 'meadow', 'dirt', 'rock', 'sand'] as const
 /** Metres per texture repeat, how rough each surface is, and a colour grade per layer. */
 const LAYER_SCALE = [3.2, 4.2, 3.6, 7.0, 9.0]
 const LAYER_ROUGHNESS = [0.93, 0.94, 0.95, 0.84, 0.96]
-const LAYER_TINT: THREE.Vector3Tuple[] = [[0.5, 0.78, 0.4], [0.52, 0.7, 0.42], [0.9, 0.86, 0.8], [0.86, 0.84, 0.82], [1.0, 0.96, 0.88]]
+// (the alien ground photos are graded in the images themselves; the shore is toned down a little so it doesn't glare)
+const LAYER_TINT: THREE.Vector3Tuple[] = [[1, 1, 1], [0.78, 0.9, 0.8], [1, 1, 1], [1, 1, 1], [0.82, 0.82, 0.82]]
 /** Average colours: shown until the photographs arrive. */
-const LAYER_AVERAGE: THREE.Vector3Tuple[] = [[0.334, 0.376, 0.167], [0.587, 0.566, 0.336], [0.38, 0.321, 0.241], [0.486, 0.389, 0.297], [0.489, 0.431, 0.344]]
+const LAYER_AVERAGE: THREE.Vector3Tuple[] = [[0.357, 0.521, 0.468], [0.373, 0.336, 0.42], [0.542, 0.414, 0.282], [0.29, 0.266, 0.315], [0.661, 0.616, 0.531]]
 
 /** Decode images into one texture array (layer i = urls[i]). */
 async function loadLayerArray(urls: string[], size: number, srgb: boolean, anisotropy: number): Promise<THREE.DataArrayTexture> {

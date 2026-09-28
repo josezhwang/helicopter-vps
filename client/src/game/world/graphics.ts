@@ -33,16 +33,12 @@ export interface QualityProfile {
   grassRadius: number
   /** Texture filtering at grazing angles. */
   anisotropy: number
-  /** The sky photo at 8K (sharp clouds on big screens) instead of 4K. */
-  sky8k: boolean
   /** Ground photo resolution. */
   terrainTextures: 2048 | 1024
   /** Fraction of the screen resolution actually drawn (below 1 on weak PCs; the picture is scaled up). */
   renderScale: number
   /** Sun shadows at all. */
   shadows: boolean
-  /** The photographed sky (clouds); without it a plain painted sky. */
-  skyPhoto: boolean
   /** Ground photos only right around the player, plain colours beyond (much cheaper to draw). */
   terrainLite: boolean
   /** The lighter robot model for the soldiers. */
@@ -52,10 +48,10 @@ export interface QualityProfile {
 }
 
 export const PROFILES: Record<Quality, QualityProfile> = {
-  ultra: { pixelRatio: 2, sun: 'cascades', shadowMapSize: 4096, shadowDistance: 600, ao: { mode: 'High', halfRes: false }, bloom: true, godRays: true, smaa: true, grassBlades: 380_000, grassRadius: 64, anisotropy: 16, sky8k: true, terrainTextures: 2048, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: false, grassClumps: false },
-  high: { pixelRatio: 1.5, sun: 'cascades', shadowMapSize: 2048, shadowDistance: 420, ao: { mode: 'Medium', halfRes: true }, bloom: true, godRays: false, smaa: true, grassBlades: 210_000, grassRadius: 50, anisotropy: 8, sky8k: true, terrainTextures: 2048, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: false, grassClumps: false },
-  medium: { pixelRatio: 1.25, sun: 'box', shadowMapSize: 2048, shadowDistance: 160, ao: null, bloom: true, godRays: false, smaa: true, grassBlades: 90_000, grassRadius: 36, anisotropy: 4, sky8k: false, terrainTextures: 1024, renderScale: 1, shadows: true, skyPhoto: true, terrainLite: false, robotLite: true, grassClumps: false },
-  low: { pixelRatio: 1, sun: 'box', shadowMapSize: 1024, shadowDistance: 160, ao: null, bloom: false, godRays: false, smaa: false, grassBlades: 0, grassRadius: 0, anisotropy: 2, sky8k: false, terrainTextures: 1024, renderScale: 0.75, shadows: false, skyPhoto: false, terrainLite: true, robotLite: true, grassClumps: false },
+  ultra: { pixelRatio: 2, sun: 'cascades', shadowMapSize: 4096, shadowDistance: 600, ao: { mode: 'High', halfRes: false }, bloom: true, godRays: true, smaa: true, grassBlades: 380_000, grassRadius: 64, anisotropy: 16, terrainTextures: 2048, renderScale: 1, shadows: true, terrainLite: false, robotLite: false, grassClumps: false },
+  high: { pixelRatio: 1.5, sun: 'cascades', shadowMapSize: 2048, shadowDistance: 420, ao: { mode: 'Medium', halfRes: true }, bloom: true, godRays: false, smaa: true, grassBlades: 210_000, grassRadius: 50, anisotropy: 8, terrainTextures: 2048, renderScale: 1, shadows: true, terrainLite: false, robotLite: false, grassClumps: false },
+  medium: { pixelRatio: 1.25, sun: 'box', shadowMapSize: 2048, shadowDistance: 160, ao: null, bloom: true, godRays: false, smaa: true, grassBlades: 90_000, grassRadius: 36, anisotropy: 4, terrainTextures: 1024, renderScale: 1, shadows: true, terrainLite: false, robotLite: true, grassClumps: false },
+  low: { pixelRatio: 1, sun: 'box', shadowMapSize: 1024, shadowDistance: 160, ao: null, bloom: false, godRays: false, smaa: false, grassBlades: 0, grassRadius: 0, anisotropy: 2, terrainTextures: 1024, renderScale: 0.75, shadows: false, terrainLite: true, robotLite: true, grassClumps: false },
 }
 
 const STORAGE_KEY = 'aerium_quality'

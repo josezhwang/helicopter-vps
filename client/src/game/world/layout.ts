@@ -54,6 +54,9 @@ export const LAYOUT = {
   /** Two combat mechs either side of the gate, outside the walls, facing out. */
   mechs: [[-58, 72], [62, 72]] as Spot[],
   mechYaw: 0,
+  /** Two space fighters on pads outside the wall on the far side from the helicopters, noses towards midfield. */
+  fighters: [[-74, 24], [-74, -12]] as Spot[],
+  fighterYaw: 0,
   /** Explosive barrels: two by the gate, one by the fuel tanker. */
   barrels: [[-26, 57], [26, 57], [-21, 27]] as Spot[],
   /** Ammo boxes in the fenced gate lane behind the spawn: primary-gun (5.56) rounds left, handgun (9mm) rounds right. */

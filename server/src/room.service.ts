@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomInt } from 'node:crypto'
 import { DatabaseService } from './database.service'
+import { DISCORD_COLOR, DiscordService, plain } from './discord.service'
 import { PublicUser } from './auth.service'
 
 export type Team = 'red' | 'blue'
@@ -22,7 +23,7 @@ function shuffle<T>(items: T[]): T[] {
 
 @Injectable()
 export class RoomService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(private readonly database: DatabaseService, private readonly discord: DiscordService) {}
 
   async list(): Promise<Record<string, unknown>[]> {
     const result = await this.database.query(`
@@ -39,7 +40,7 @@ export class RoomService {
     return result.rows
   }
 
-  async create(input: Record<string, unknown>, user: PublicUser) {
+  async create(input: Record<string, unknown>, user: PublicUser, origin?: string) {
     const name = str(input.name).trim()
     const maxMembers = Number(input.maxMembers)
     if (!name || name.length > MAX_ROOM_NAME) throw new BadRequestException(`Room name is required (up to ${MAX_ROOM_NAME} characters)`)
@@ -49,7 +50,7 @@ export class RoomService {
     }
     if (input.battleType !== 'flag steal') throw new BadRequestException('Only flag steal is available right now')
 
-    return this.database.transaction(async (client) => {
+    const created = await this.database.transaction(async (client) => {
       const room = await client.query(
         'INSERT INTO room (name, max_members, battle_type, creator_id) VALUES ($1, $2, $3, $4) RETURNING id, name, max_members, battle_type, status, creator_id',
         [name, maxMembers, 'flag steal', user.id],
@@ -57,6 +58,14 @@ export class RoomService {
       await client.query('INSERT INTO room_member (room_id, user_id) VALUES ($1, $2)', [room.rows[0].id, user.id])
       return { ...room.rows[0], member_count: 1, member_ids: [user.id] }
     })
+    const link = this.discord.roomLink(created.id, origin)
+    this.discord.post({
+      title: `New battle: ${plain(name)}`,
+      description: `${plain(user.displayName)} is looking for ${maxMembers - 1} more ${maxMembers - 1 === 1 ? 'pilot' : 'pilots'} (${maxMembers / 2} vs ${maxMembers / 2}, gem steal).${link ? `\n**[Join the battle](${link})**` : ''}`,
+      url: link || undefined,
+      color: DISCORD_COLOR.news,
+    })
+    return created
   }
 
   async join(roomId: string, user: PublicUser): Promise<Record<string, unknown>> {
@@ -95,7 +104,30 @@ export class RoomService {
       )
       const result = await client.query("UPDATE room SET status = 'live' WHERE id = $1 RETURNING id, name, max_members, battle_type, status", [roomId])
       return result.rows[0]
+    }).then(async (started) => {
+      await this.announceStart(roomId, started.name).catch(() => {})
+      return started
     })
+  }
+
+  /** Discord: the battle is on, with both teams' line-ups. */
+  private async announceStart(roomId: string, name: string) {
+    if (!this.discord.enabled) return
+    const roster = await this.matchRoster(roomId)
+    if (!roster) return
+    const team = (t: Team) => roster.players.filter((p) => p.team === t).map((p) => plain(p.displayName)).join(', ') || '—'
+    this.discord.post({
+      title: `Battle started: ${plain(name)}`,
+      description: 'Steal the enemy gem and bring it home.',
+      color: DISCORD_COLOR.gold,
+      fields: [{ name: 'Blue team', value: team('blue'), inline: true }, { name: 'Red team', value: team('red'), inline: true }],
+    })
+  }
+
+  /** A room's name (for Discord posts), or ''. */
+  async roomName(roomId: string): Promise<string> {
+    const result = await this.database.query<{ name: string }>('SELECT name FROM room WHERE id = $1', [roomId])
+    return result.rows[0]?.name ?? ''
   }
 
   async matchRoster(roomId: string): Promise<{ status: string; players: Array<{ id: string; displayId: string; displayName: string; team: Team | null }> } | null> {

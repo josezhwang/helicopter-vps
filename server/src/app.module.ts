@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt'
 import { AuthController } from './auth.controller'
 import { AuthService } from './auth.service'
 import { DatabaseService } from './database.service'
+import { DiscordService } from './discord.service'
 import { GameModule } from './game/game.module'
 import { RealtimeService } from './realtime.service'
 import { RoomController } from './room.controller'
@@ -20,6 +21,6 @@ import { RoomService } from './room.service'
     }),
   ],
   controllers: [AuthController, RoomController],
-  providers: [DatabaseService, AuthService, RoomService, RealtimeService],
+  providers: [DatabaseService, DiscordService, AuthService, RoomService, RealtimeService],
 })
 export class AppModule {}
