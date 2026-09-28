@@ -6,7 +6,7 @@
 export type Team = 'blue' | 'red'
 export const TEAMS: Team[] = ['blue', 'red']
 
-const BASE_CENTER: Record<Team, { x: number; z: number }> = { blue: { x: -380, z: -380 }, red: { x: 380, z: 380 } }
+export const BASE_CENTER: Record<Team, { x: number; z: number }> = { blue: { x: -380, z: -380 }, red: { x: 380, z: 380 } }
 const BASE_ROTATION: Record<Team, number> = { blue: Math.PI / 2, red: -Math.PI / 2 }
 
 export function baseToWorld(team: Team, x: number, z: number): [number, number] {
@@ -127,6 +127,8 @@ export interface Item {
   kind: ItemKind
   x: number
   z: number
+  /** Height it was dropped at (items dropped up on a capital ship's deck stay there). */
+  y?: number
   yaw: number
   count: number
   mag: number

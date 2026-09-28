@@ -5,6 +5,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { AuthService } from './auth.service'
 import { DISCORD_COLOR, DiscordService, plain } from './discord.service'
 import { RoomService, Team } from './room.service'
+import { Bot, BOT_DAMAGE, type BotSeen } from './bots'
 import { AMMO, AMMO_TYPES, BARRELS, GEM_PEDESTAL, MACHINE_GUN_SPOTS, SHIP_ABOARD, SHIP_CANNON, SHIP_HULL, SHIP_MAX_HP, bridgeId, VEHICLE_HOMES, VEHICLE_MAX_HP, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type VehicleKindId, type WeaponKind } from './game-layout'
 
 type Vec3 = [number, number, number]
@@ -39,6 +40,8 @@ interface Connection {
   ws: WebSocket
   userId: string
   team: Team
+  /** A computer-controlled player (no socket: the server moves it). */
+  bot?: Bot
   state: PlayerState | null
   lastStateAt: number
   alive: boolean
@@ -130,6 +133,10 @@ const GUN_ID = /^(blue|red)-mg-[0-8]$/
 const SEATS = { heli: 4, car: 1, tank: 1, mech: 1, fighter: 1 }
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
+/** Bots think this often. */
+const BOT_TICK_MS = 100
+/** A socket that goes nowhere, for the bots. */
+const NO_SOCKET = { readyState: WebSocket.CLOSED, send() {}, close() {}, terminate() {}, ping() {} } as unknown as WebSocket
 const MAX_HP = 100
 /** Energy shields: this strong, back after SHIELD_DELAY_MS without a hit, refilling at SHIELD_RATE per second. */
 const MAX_SHIELD = 100
@@ -274,15 +281,18 @@ export class RealtimeService implements OnModuleDestroy {
     this.heartbeat = setInterval(() => {
       for (const room of this.rooms.values()) {
         for (const conn of room.values()) {
+          if (conn.bot) continue
           if (!conn.alive) conn.ws.terminate()
           else { conn.alive = false; conn.ws.ping() }
         }
       }
     }, 30_000)
     this.shieldTick = setInterval(() => this.rechargeShields(), SHIELD_TICK_MS)
+    this.botTick = setInterval(() => this.tickBots(), BOT_TICK_MS)
   }
 
   private shieldTick?: NodeJS.Timeout
+  private botTick?: NodeJS.Timeout
 
   /** Shields come back once a player hasn't been hit for SHIELD_DELAY_MS. */
   private rechargeShields() {
@@ -299,6 +309,7 @@ export class RealtimeService implements OnModuleDestroy {
   onModuleDestroy() {
     clearInterval(this.heartbeat)
     clearInterval(this.shieldTick)
+    clearInterval(this.botTick)
     for (const roomId of new Set([...this.vitals.keys(), ...this.worlds.keys()])) this.clearRoom(roomId)
     for (const ws of this.wss.clients) ws.terminate()
     this.wss.close()
@@ -350,8 +361,10 @@ export class RealtimeService implements OnModuleDestroy {
       const room = this.rooms.get(joined.roomId)
       if (room?.get(joined.conn.userId) !== joined.conn) return
       room.delete(joined.conn.userId)
-      if (room.size === 0) this.rooms.delete(joined.roomId)
       this.broadcast(joined.roomId, { type: 'leave', id: joined.conn.userId })
+      // With the last human gone the bots stop too (they come back when someone rejoins)
+      if (![...room.values()].some((c) => !c.bot)) room.clear()
+      if (room.size === 0) this.rooms.delete(joined.roomId)
     })
   }
 
@@ -378,6 +391,7 @@ export class RealtimeService implements OnModuleDestroy {
     room.get(user.id)?.ws.close(4000, 'Connected from another tab')
     const conn: Connection = { ws, userId: user.id, team: me.team, state: null, lastStateAt: 0, alive: true }
     room.set(user.id, conn)
+    this.spawnBots(roomId, roster.players)
 
     const players = roster.players.map((player) => {
       const live = room.get(player.id)
@@ -426,6 +440,58 @@ export class RealtimeService implements OnModuleDestroy {
     let vitals = room.get(userId)
     if (!vitals) room.set(userId, (vitals = { hp: MAX_HP, dead: false, lastShotAt: 0, lastShotFxAt: 0, lastMissileAt: 0, lastDropAt: 0, lastCannonAt: 0, mechRockets: [], shield: MAX_SHIELD, hurtAt: 0, lastMeleeAt: 0, streak: 0 }))
     return vitals
+  }
+
+  /** Put the room's bots into the battle (once; they stay while any human is connected). */
+  private spawnBots(roomId: string, roster: Array<{ id: string; team: Team | null; bot?: boolean; displayId: string; displayName: string }>) {
+    const room = this.rooms.get(roomId)
+    if (!room) return
+    let index = 0
+    for (const player of roster) {
+      if (!player.bot || !player.team || room.has(player.id)) { if (player.bot) index++; continue }
+      const bot = new Bot(player.id, player.team, index++)
+      const conn: Connection = { ws: NO_SOCKET, userId: player.id, team: player.team, state: this.botState(roomId, bot), lastStateAt: 0, alive: true, bot }
+      room.set(player.id, conn)
+      const vitals = this.vitalsOf(roomId, player.id)
+      this.broadcast(roomId, { type: 'player', player: { ...player, online: true, state: conn.state, hp: vitals.hp, shield: Math.round(vitals.shield), dead: vitals.dead } })
+    }
+  }
+
+  private botState(roomId: string, bot: Bot): PlayerState {
+    return { p: [...bot.p] as Vec3, yaw: bot.yaw, pitch: bot.pitch, vehicle: null, gun: null, w: 'primary', inv: EMPTY_LOADOUT(), flag: bot.flag, hp: this.vitalsOf(roomId, bot.id).hp }
+  }
+
+  /** Every bot in every room: look, move, fight, and tell everyone where it is. */
+  private tickBots() {
+    for (const [roomId, room] of this.rooms) {
+      const conns = [...room.values()]
+      // (the battle is over once its world is cleared)
+      if (!conns.some((c) => c.bot) || !this.worlds.has(roomId)) continue
+      const everyone: BotSeen[] = []
+      for (const c of conns) {
+        const st = c.state
+        if (!st) continue
+        const vitals = this.vitalsOf(roomId, c.userId)
+        everyone.push({ id: c.userId, team: c.team, p: st.vehicle?.p ?? st.p, alive: !vitals.dead, flag: st.flag, onFoot: !st.vehicle, moving: c.bot ? c.bot.moving : Date.now() - c.lastStateAt < 300 })
+      }
+      for (const conn of conns) {
+        const bot = conn.bot
+        if (!bot) continue
+        const alive = !this.vitalsOf(roomId, bot.id).dead
+        const acting = bot.update(BOT_TICK_MS / 1000, alive, everyone, {
+          shoot: (target, hit, to) => {
+            this.broadcast(roomId, { type: 'shot', id: bot.id, to, w: 'primary' })
+            const victim = room.get(target)
+            if (hit && victim?.state && !victim.state.vehicle) this.damagePlayer(roomId, victim, BOT_DAMAGE, bot.id, 'primary')
+          },
+          gemTaken: (team) => conns.some((c) => c.team !== team && c.state?.flag && !this.vitalsOf(roomId, c.userId).dead),
+          capture: () => { void this.capture(roomId, conn) },
+        })
+        if (!acting) continue
+        conn.state = this.botState(roomId, bot)
+        this.broadcast(roomId, { type: 'state', id: bot.id, s: conn.state })
+      }
+    }
   }
 
   private clearRoom(roomId: string) {
@@ -758,7 +824,7 @@ export class RealtimeService implements OnModuleDestroy {
    */
   private fire(roomId: string, shooter: Connection, message: Record<string, unknown>) {
     const kind = message.kind === 'shell' || message.kind === 'rocket' || message.kind === 'pulse' || message.kind === 'cannon' ? message.kind : null
-    const to = vec(message.to, 600, -100, 600)
+    const to = vec(message.to, 600)
     const state = shooter.state
     const vitals = this.vitalsOf(roomId, shooter.userId)
     if (!kind || !to || !state || vitals.dead) return
@@ -801,7 +867,7 @@ export class RealtimeService implements OnModuleDestroy {
 
   /** A grenade leaves someone's hand: everyone else sees it fly (their game simulates the same throw). */
   private throwGrenade(roomId: string, conn: Connection, message: Record<string, unknown>) {
-    const from = vec(message.from, 600, -100, 600)
+    const from = vec(message.from, 600)
     const velocity = vec(message.v, 60, -60, 60)
     const state = conn.state
     if (!from || !velocity || !state || state.vehicle || this.vitalsOf(roomId, conn.userId).dead) return
@@ -817,7 +883,7 @@ export class RealtimeService implements OnModuleDestroy {
 
   /** The thrower's game says where its grenade went off (it rolled and bounced there); it must be one they threw. */
   private grenadeBlast(roomId: string, conn: Connection, message: Record<string, unknown>) {
-    const at = vec(message.at, 600, -100, 600)
+    const at = vec(message.at, 600)
     const world = this.worldOf(roomId)
     const now = Date.now()
     const live = (world.grenades.get(conn.userId) ?? []).filter((g) => g.until > now)
@@ -920,7 +986,7 @@ export class RealtimeService implements OnModuleDestroy {
     const world = this.worldOf(roomId)
     const id = `drop-${++this.dropCounter}`
     const angle = Math.random() * Math.PI * 2, spread = 0.6 + Math.random() * 0.8
-    const item: Item = { id, kind, x: where[0] + Math.cos(angle) * spread, z: where[2] + Math.sin(angle) * spread, yaw: Math.random() * Math.PI * 2, count, mag, fixed: false }
+    const item: Item = { id, kind, x: where[0] + Math.cos(angle) * spread, z: where[2] + Math.sin(angle) * spread, y: where[1], yaw: Math.random() * Math.PI * 2, count, mag, fixed: false }
     world.items.set(id, item)
     world.dropped.push(id)
     this.itemUpdate(roomId, item)
@@ -995,6 +1061,9 @@ export class RealtimeService implements OnModuleDestroy {
     if (!(await this.roomService.finish(roomId))) return
     this.broadcast(roomId, { type: 'end', winner: conn.team, by: conn.userId })
     this.clearRoom(roomId)
+    // The bots stand down
+    const room = this.rooms.get(roomId)
+    if (room) for (const [id, c] of room) if (c.bot) room.delete(id)
     void this.announceWin(roomId, conn)
   }
 

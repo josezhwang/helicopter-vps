@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { heightAt } from './terrain'
+import { groundAt } from './floors'
 import { loadProp, propInstances, type Prop, type PropName } from './props'
 import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
 import { AMMO, WEAPONS, WEAPON_KINDS, type AmmoType, type WeaponKind } from './weapons'
@@ -17,6 +18,8 @@ export interface NetItem {
   kind: ItemKind
   x: number
   z: number
+  /** Where it was dropped from, if up off the terrain (a capital ship's deck). */
+  y?: number
   /** Heading on the ground (radians, world). */
   yaw: number
   /** Rounds / missiles inside (a weapon's spare rounds, a crate's missiles, a box's rounds). */
@@ -121,7 +124,8 @@ export function createItems(): ItemField {
   }
 
   const onTable = (item: NetItem) => item.fixed && isWeaponItem(item.kind)
-  const positionOf = (item: NetItem) => new THREE.Vector3(item.x, heightAt(item.x, item.z) + (onTable(item) ? RACK_TOP : 0), item.z)
+  // (a drop up on a capital ship's deck lies on the deck)
+  const positionOf = (item: NetItem) => new THREE.Vector3(item.x, (item.y !== undefined ? groundAt(item.x, item.z, item.y) : heightAt(item.x, item.z)) + (onTable(item) ? RACK_TOP : 0), item.z)
 
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3()
   const rebuild = (camera: THREE.Vector3) => {

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { heightAt } from './terrain'
+import { groundAt } from './floors'
 import { loadProp, propInstances } from './props'
 
 /**
@@ -121,7 +122,9 @@ export function createGrenades(world: GrenadeWorld): Grenades {
     const p = g.position
     g.velocity.y -= GRAVITY * h
     p.addScaledVector(g.velocity, h)
-    const ground = heightAt(p.x, p.z)
+    // (the terrain, or a ship's deck it landed on)
+    const ground = groundAt(p.x, p.z, p.y + 1)
+    const onFloor = ground > heightAt(p.x, p.z) + 0.3
     // Walls and buildings (axis-aligned boxes): out through the nearest side, bouncing off it
     for (const box of boxes) {
       if (p.x < box.min.x - RADIUS || p.x > box.max.x + RADIUS || p.y < box.min.y - RADIUS || p.y > box.max.y + RADIUS || p.z < box.min.z - RADIUS || p.z > box.max.z + RADIUS) continue
@@ -147,7 +150,8 @@ export function createGrenades(world: GrenadeWorld): Grenades {
     if (p.y < ground + RADIUS) {
       p.y = ground + RADIUS
       const e = 0.4
-      normal.set(heightAt(p.x - e, p.z) - heightAt(p.x + e, p.z), 2 * e, heightAt(p.x, p.z - e) - heightAt(p.x, p.z + e)).normalize()
+      if (onFloor) normal.set(0, 1, 0)
+      else normal.set(heightAt(p.x - e, p.z) - heightAt(p.x + e, p.z), 2 * e, heightAt(p.x, p.z - e) - heightAt(p.x, p.z + e)).normalize()
       bounce(g, normal)
       // Rolling resistance (grass)
       g.velocity.multiplyScalar(Math.max(0, 1 - h * 3.5))

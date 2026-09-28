@@ -9,6 +9,12 @@ export type Team = 'red' | 'blue'
 export const MAX_ROOM_NAME = 32
 const MIN_PLAYERS = 2
 const MAX_PLAYERS = 32
+/** Computer-controlled players per team (0 = none). */
+export const MAX_BOTS_PER_TEAM = 8
+const BOT_NAMES = ['Viper', 'Rook', 'Nova', 'Havoc', 'Ghost', 'Saber', 'Blitz', 'Onyx']
+/** A bot's player id (never a UUID, so it can't clash with a user). */
+export const botId = (team: Team, n: number) => `bot-${team}-${n}`
+export const isBot = (id: string) => id.startsWith('bot-')
 
 const str = (value: unknown) => (typeof value === 'string' ? value : '')
 
@@ -27,7 +33,7 @@ export class RoomService {
 
   async list(): Promise<Record<string, unknown>[]> {
     const result = await this.database.query(`
-      SELECT r.id, r.name, r.max_members, r.battle_type, r.status, r.creator_id,
+      SELECT r.id, r.name, r.max_members, r.battle_type, r.status, r.creator_id, r.bots_per_team,
         u.display_id AS creator_display_id, COUNT(m.user_id)::int AS member_count,
         COALESCE(array_agg(m.user_id) FILTER (WHERE m.user_id IS NOT NULL), '{}') AS member_ids
       FROM room r
@@ -49,11 +55,13 @@ export class RoomService {
       throw new BadRequestException(`Choose an even number of players from ${MIN_PLAYERS} to ${MAX_PLAYERS} so both teams are equal`)
     }
     if (input.battleType !== 'flag steal') throw new BadRequestException('Only flag steal is available right now')
+    const bots = input.botsPerTeam === undefined || input.botsPerTeam === '' ? 0 : Number(input.botsPerTeam)
+    if (!Number.isInteger(bots) || bots < 0 || bots > MAX_BOTS_PER_TEAM) throw new BadRequestException(`Bots per team: a whole number from 0 to ${MAX_BOTS_PER_TEAM}`)
 
     const created = await this.database.transaction(async (client) => {
       const room = await client.query(
-        'INSERT INTO room (name, max_members, battle_type, creator_id) VALUES ($1, $2, $3, $4) RETURNING id, name, max_members, battle_type, status, creator_id',
-        [name, maxMembers, 'flag steal', user.id],
+        'INSERT INTO room (name, max_members, battle_type, creator_id, bots_per_team) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, max_members, battle_type, status, creator_id, bots_per_team',
+        [name, maxMembers, 'flag steal', user.id, bots],
       )
       await client.query('INSERT INTO room_member (room_id, user_id) VALUES ($1, $2)', [room.rows[0].id, user.id])
       return { ...room.rows[0], member_count: 1, member_ids: [user.id] }
@@ -87,13 +95,14 @@ export class RoomService {
 
   async start(roomId: string, user: PublicUser): Promise<Record<string, unknown>> {
     return this.database.transaction(async (client) => {
-      const locked = await client.query<{ status: string; max_members: number; creator_id: string }>('SELECT status, max_members, creator_id FROM room WHERE id = $1 FOR UPDATE', [roomId])
+      const locked = await client.query<{ status: string; max_members: number; creator_id: string; bots_per_team: number }>('SELECT status, max_members, creator_id, bots_per_team FROM room WHERE id = $1 FOR UPDATE', [roomId])
       const room = locked.rows[0]
       if (!room) throw new NotFoundException('Room not found')
       if (room.creator_id !== user.id) throw new ForbiddenException('Only the room creator can start the game')
       if (room.status !== 'waiting') throw new BadRequestException('This room has already started')
       const members = await client.query<{ user_id: string }>('SELECT user_id FROM room_member WHERE room_id = $1', [roomId])
-      if (members.rows.length < room.max_members) throw new BadRequestException('The room must be full before starting')
+      // With bots the battle can start before every seat is taken (the bots make up the numbers)
+      if (members.rows.length < room.max_members && !room.bots_per_team) throw new BadRequestException('The room must be full before starting')
 
       const ids = shuffle(members.rows.map((row) => row.user_id))
       // With an odd count the extra pilot lands on a random side
@@ -130,14 +139,18 @@ export class RoomService {
     return result.rows[0]?.name ?? ''
   }
 
-  async matchRoster(roomId: string): Promise<{ status: string; players: Array<{ id: string; displayId: string; displayName: string; team: Team | null }> } | null> {
-    const room = await this.database.query<{ status: string }>('SELECT status FROM room WHERE id = $1', [roomId])
+  async matchRoster(roomId: string): Promise<{ status: string; players: Array<{ id: string; displayId: string; displayName: string; team: Team | null; bot?: boolean }> } | null> {
+    const room = await this.database.query<{ status: string; bots_per_team: number }>('SELECT status, bots_per_team FROM room WHERE id = $1', [roomId])
     if (!room.rows[0]) return null
+    // The bots: the same number on each side, named for their team
+    const bots = (['blue', 'red'] as Team[]).flatMap((team) => Array.from({ length: room.rows[0].bots_per_team ?? 0 }, (_, i) => ({
+      id: botId(team, i + 1), displayId: `bot${i + 1}`, displayName: `${BOT_NAMES[i % BOT_NAMES.length]} [BOT]`, team, bot: true,
+    })))
     const players = await this.database.query<{ id: string; display_id: string; display_name: string; team: Team | null }>(
       'SELECT u.id, u.display_id, u.display_name, m.team FROM room_member m JOIN "user" u ON u.id = m.user_id WHERE m.room_id = $1 ORDER BY m.joined_at',
       [roomId],
     )
-    return { status: room.rows[0].status, players: players.rows.map((row) => ({ id: row.id, displayId: row.display_id, displayName: row.display_name, team: row.team })) }
+    return { status: room.rows[0].status, players: [...players.rows.map((row) => ({ id: row.id, displayId: row.display_id, displayName: row.display_name, team: row.team })), ...bots] }
   }
 
   async assignTeam(roomId: string, userId: string, team: Team) {
@@ -151,7 +164,7 @@ export class RoomService {
 
   private async getRoom(roomId: string): Promise<Record<string, any>> {
     const result = await this.database.query(`
-      SELECT r.id, r.name, r.max_members, r.battle_type, r.status, r.creator_id, COUNT(m.user_id)::int AS member_count,
+      SELECT r.id, r.name, r.max_members, r.battle_type, r.status, r.creator_id, r.bots_per_team, COUNT(m.user_id)::int AS member_count,
         COALESCE(array_agg(m.user_id) FILTER (WHERE m.user_id IS NOT NULL), '{}') AS member_ids
       FROM room r LEFT JOIN room_member m ON m.room_id = r.id
       WHERE r.id = $1 GROUP BY r.id

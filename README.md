@@ -71,6 +71,10 @@ Players open the site at `http://<server-ip>:5173`; the client calls the API on 
 - **Discord**: the room lobby's **Copy Discord invite** button copies a join link to paste into your Discord. To have the server post new battles (with the join link), battle starts, killing sprees and winners to a Discord channel, create a webhook in the channel (channel settings → Integrations → Webhooks) and put its URL in `server/.env` as `DISCORD_WEBHOOK_URL` (and the address players open the game at as `PUBLIC_SITE_URL`, for the links). See `server/.env.example`.
 - **Sound** is made live in the browser (no sound files): every gun class, cannon, rockets, explosions that arrive late from far away, rotors, engines and tank tracks, bullet impacts, lock-on tones. It starts after your first click.
 
+## Bots
+
+When you create a room you can add **bots per team** (0–8). When the battle starts they join both sides (named like "Viper [BOT]"): most of them attack — out through their gate, across the field, into the enemy base to steal the gem and carry it home — while every third one holds back to defend its gate and gem, and any bot drops everything to hunt down an enemy running off with its team's gem. They fight whoever they can see (hills and base walls block their view), with accuracy that falls off with distance; they take damage, die and respawn like everyone else. With bots in a room the creator can start the battle before every seat is taken — even alone.
+
 ## Goal
 
 Steal the enemy team's gem from their base and carry it back to your own gem to win (on foot for the last step: you can't capture from inside a vehicle).

@@ -60,6 +60,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       )
     `)
     await this.pool.query(`ALTER TABLE room_member ADD COLUMN IF NOT EXISTS team TEXT CHECK (team IN ('red', 'blue'))`)
+    // Computer-controlled players added to each team when the battle starts
+    await this.pool.query(`ALTER TABLE room ADD COLUMN IF NOT EXISTS bots_per_team INTEGER NOT NULL DEFAULT 0 CHECK (bots_per_team BETWEEN 0 AND 8)`)
     console.log('PostgreSQL connected')
   }
 
