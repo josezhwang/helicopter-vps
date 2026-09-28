@@ -5,8 +5,9 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { AuthService } from './auth.service'
 import { DISCORD_COLOR, DiscordService, plain } from './discord.service'
 import { RoomService, Team } from './room.service'
-import { Bot, BOT_DAMAGE, type BotSeen } from './bots'
-import { AMMO, AMMO_TYPES, BARRELS, GEM_PEDESTAL, MACHINE_GUN_SPOTS, SHIP_ABOARD, SHIP_CANNON, SHIP_HULL, SHIP_MAX_HP, bridgeId, VEHICLE_HOMES, VEHICLE_MAX_HP, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type VehicleKindId, type WeaponKind } from './game-layout'
+import { Bot, BOT_WEAPON_POWER, type BotSeen, type BotWorld, type GunSeen, type VehicleSeen } from './bots'
+import { heightAt } from './terrain'
+import { AMMO, AMMO_TYPES, BARRELS, BASE_CENTER, GEM_PEDESTAL, MACHINE_GUN_SPOTS, SHIP_ABOARD, SHIP_CANNON, SHIP_HULL, SHIP_MAX_HP, bridgeId, VEHICLE_HOMES, VEHICLE_MAX_HP, WEAPONS as ARMS, initialItems, isWeaponItem, type AmmoType, type Item, type ItemKind, type VehicleKindId, type WeaponKind } from './game-layout'
 
 type Vec3 = [number, number, number]
 
@@ -458,7 +459,8 @@ export class RealtimeService implements OnModuleDestroy {
   }
 
   private botState(roomId: string, bot: Bot): PlayerState {
-    return { p: [...bot.p] as Vec3, yaw: bot.yaw, pitch: bot.pitch, vehicle: null, gun: null, w: 'primary', inv: EMPTY_LOADOUT(), flag: bot.flag, hp: this.vitalsOf(roomId, bot.id).hp }
+    const pose = bot.pose()
+    return { p: pose.p, yaw: pose.yaw, pitch: pose.pitch, vehicle: pose.vehicle, gun: pose.gun, w: pose.vehicle || pose.gun ? '' : 'primary', inv: EMPTY_LOADOUT(), flag: pose.flag, hp: this.vitalsOf(roomId, bot.id).hp }
   }
 
   /** Every bot in every room: look, move, fight, and tell everyone where it is. */
@@ -467,30 +469,86 @@ export class RealtimeService implements OnModuleDestroy {
       const conns = [...room.values()]
       // (the battle is over once its world is cleared)
       if (!conns.some((c) => c.bot) || !this.worlds.has(roomId)) continue
-      const everyone: BotSeen[] = []
-      for (const c of conns) {
-        const st = c.state
-        if (!st) continue
-        const vitals = this.vitalsOf(roomId, c.userId)
-        everyone.push({ id: c.userId, team: c.team, p: st.vehicle?.p ?? st.p, alive: !vitals.dead, flag: st.flag, onFoot: !st.vehicle, moving: c.bot ? c.bot.moving : Date.now() - c.lastStateAt < 300 })
+      try {
+        this.tickRoomBots(roomId, room, conns)
+      } catch (error) {
+        // One room's bots going wrong must never take the server down
+        console.error('bots', roomId, error)
       }
-      for (const conn of conns) {
-        const bot = conn.bot
-        if (!bot) continue
-        const alive = !this.vitalsOf(roomId, bot.id).dead
-        const acting = bot.update(BOT_TICK_MS / 1000, alive, everyone, {
-          shoot: (target, hit, to) => {
-            this.broadcast(roomId, { type: 'shot', id: bot.id, to, w: 'primary' })
-            const victim = room.get(target)
-            if (hit && victim?.state && !victim.state.vehicle) this.damagePlayer(roomId, victim, BOT_DAMAGE, bot.id, 'primary')
-          },
-          gemTaken: (team) => conns.some((c) => c.team !== team && c.state?.flag && !this.vitalsOf(roomId, c.userId).dead),
-          capture: () => { void this.capture(roomId, conn) },
-        })
-        if (!acting) continue
-        conn.state = this.botState(roomId, bot)
-        this.broadcast(roomId, { type: 'state', id: bot.id, s: conn.state })
+    }
+  }
+
+  private tickRoomBots(roomId: string, room: Map<string, Connection>, conns: Connection[]) {
+    const world = this.worldOf(roomId)
+    const now = Date.now()
+    const everyone: BotSeen[] = []
+    for (const c of conns) {
+      const st = c.state
+      if (!st) continue
+      const v = st.vehicle
+      const airborne = !!v && /-(heli|fighter)-/.test(v.id) && v.p[1] - heightAt(v.p[0], v.p[2]) > 4
+      everyone.push({ id: c.userId, team: c.team, p: v?.p ?? st.p, alive: !this.vitalsOf(roomId, c.userId).dead, flag: st.flag, vehicle: v?.id ?? null, airborne, moving: c.bot ? c.bot.moving : now - c.lastStateAt < 300 })
+    }
+    const vehicles = (): VehicleSeen[] => [...VEHICLE_HOMES.keys()].map((id) => {
+      const pose = this.vehiclePosition(roomId, id)!
+      const p: Vec3 = pose.length === 3 ? pose : [pose[0], heightAt(pose[0], pose[1]), pose[1]]
+      const driver = this.occupants(roomId, id).find((c) => c.state!.vehicle!.seat === 0)
+      return { id, kind: kindOf(id), team: id.startsWith('blue') ? 'blue' : 'red', p, driver: driver?.userId ?? null, wrecked: world.wrecks.has(id) }
+    })
+    const guns = (): GunSeen[] => (['blue', 'red'] as Team[]).flatMap((team) => [0, 1, 2, 3, 4].map((i) => {
+      const id = `${team}-mg-${i}`
+      const [x, z] = MACHINE_GUN_SPOTS.get(id)!
+      const occupant = conns.find((c) => c.state?.gun?.id === id && !this.vitalsOf(roomId, c.userId).dead)
+      return { id, team, x, z, facing: Math.atan2(x - BASE_CENTER[team].x, z - BASE_CENTER[team].z), occupant: occupant?.userId ?? null }
+    }))
+    for (const conn of conns) {
+      const bot = conn.bot
+      if (!bot) continue
+      const alive = !this.vitalsOf(roomId, bot.id).dead
+      // Pulled out of a vehicle (hijacked) or off a gun
+      if (alive && conn.state && ((bot.vehicleId && conn.state.vehicle?.id !== bot.vehicleId) || (bot.gunId && conn.state.gun?.id !== bot.gunId))) bot.dismount()
+      const api: BotWorld = {
+        everyone,
+        get vehicles() { return vehicles() },
+        get guns() { return guns() },
+        gemTaken: (team) => conns.some((c) => c.team !== team && c.state?.flag && !this.vitalsOf(roomId, c.userId).dead),
+        shootPlayer: (target, weapon, hit, to) => {
+          this.broadcast(roomId, { type: 'shot', id: bot.id, to, w: weapon })
+          const victim = room.get(target)
+          if (!hit || !victim?.state || victim.team === bot.team) return
+          if (victim.state.vehicle && ['tank', 'mech'].includes(kindOf(victim.state.vehicle.id))) return
+          this.damagePlayer(roomId, victim, BOT_WEAPON_POWER[weapon] ?? 10, bot.id, weapon)
+        },
+        shootVehicle: (target, weapon, hit, to) => {
+          this.broadcast(roomId, { type: 'shot', id: bot.id, to, w: weapon })
+          const kind = kindOf(target)
+          if (!hit || kind === 'tank' || this.teammateAboard(roomId, target, conn)) return
+          const armour = kind === 'mech' ? 0.12 : weapon === 'fighter-laser' ? 0.6 : 0.35
+          this.damageVehicle(roomId, target, (BOT_WEAPON_POWER[weapon] ?? 10) * armour, bot.id, weapon)
+        },
+        shootShip: (team, weapon, hit, to) => {
+          this.broadcast(roomId, { type: 'shot', id: bot.id, to, w: weapon })
+          if (hit && team !== bot.team) this.damageShip(roomId, team, (BOT_WEAPON_POWER[weapon] ?? 10) * 0.8, bot.id)
+        },
+        fire: (kind, muzzle, to) => {
+          const distance = Math.hypot(to[0] - muzzle[0], to[1] - muzzle[1], to[2] - muzzle[2])
+          this.broadcast(roomId, { type: 'fire', id: bot.id, kind, from: muzzle, to })
+          this.later(roomId, (distance / PROJECTILE_SPEED[kind]) * 1000, () => this.explode(roomId, to, kind, bot.id))
+        },
+        claimVehicle: (id) => {
+          if (world.wrecks.has(id) || this.occupants(roomId, id).some((c) => c.state!.vehicle!.seat === 0)) return false
+          if ((world.ejectLocks.get(`${bot.id}|${id}`) ?? 0) > now) return false
+          return true
+        },
+        claimGun: (id) => !conns.some((c) => c !== conn && c.state?.gun?.id === id && !this.vitalsOf(roomId, c.userId).dead),
+        capture: () => { void this.capture(roomId, conn) },
       }
+      const acting = bot.update(BOT_TICK_MS / 1000, alive, api)
+      if (!acting) continue
+      conn.state = this.botState(roomId, bot)
+      const v = conn.state.vehicle
+      if (v) world.vehiclePoses.set(v.id, { p: v.p, r: v.r })
+      this.broadcast(roomId, { type: 'state', id: bot.id, s: conn.state })
     }
   }
 

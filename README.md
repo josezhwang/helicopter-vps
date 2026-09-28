@@ -73,7 +73,20 @@ Players open the site at `http://<server-ip>:5173`; the client calls the API on 
 
 ## Bots
 
-When you create a room you can add **bots per team** (0–8). When the battle starts they join both sides (named like "Viper [BOT]"): most of them attack — out through their gate, across the field, into the enemy base to steal the gem and carry it home — while every third one holds back to defend its gate and gem, and any bot drops everything to hunt down an enemy running off with its team's gem. They fight whoever they can see (hills and base walls block their view), with accuracy that falls off with distance; they take damage, die and respawn like everyone else. With bots in a room the creator can start the battle before every seat is taken — even alone.
+When you create a room you can add **bots per team** (0–8). When the battle starts they join both sides (named like "Viper [BOT]") and play the way players do. Each bot picks a job for each life:
+
+- **On foot:** attackers push out through their gate with their squad (a team's attackers take the same side of the field together), go into the enemy base, steal the gem and run it home.
+- **In vehicles:** others take one from their base.
+  - Tanks shell anything they see and hold outside the enemy gate.
+  - Assault buggies hose enemies with the gatling.
+  - Gunships circle the enemy base firing their ball turret and rockets.
+  - Space fighters strafe with lasers, and some make runs on the enemy capital ship.
+  - Combat mechs walk in behind the tanks.
+- **Defending:** defenders guard the gate and the gem, and man the base pulse cannons when enemy vehicles come near.
+
+Any bot on foot drops everything to hunt down an enemy running off with its team's gem. Bots go round base walls rather than through them. They fight whoever they can see: hills and base walls block their view, and their accuracy falls off with distance and against moving targets. You can shoot them, blow up their vehicles, or pull them out of a parked vehicle with **E**. They die and respawn like everyone else, and may choose a different job next life.
+
+With bots in a room, the creator can start the battle before every seat is taken, even alone.
 
 ## Goal
 
