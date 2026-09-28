@@ -74,18 +74,24 @@ export const SHIP_CENTER: Record<Team, { x: number; z: number }> = { blue: { x: 
 export const SHIP_YAW: Record<Team, number> = { blue: Math.PI / 2, red: -Math.PI / 2 }
 export const DECK_TOP = SHIP_ALTITUDE + 4
 export const DECK: Record<Team, { minX: number; maxX: number; minZ: number; maxZ: number }> = {
-  blue: { minX: -344, maxX: -264, minZ: -400, maxZ: -376 },
-  red: { minX: 264, maxX: 344, minZ: 376, maxZ: 400 },
+  blue: { minX: -364, maxX: -244, minZ: -400, maxZ: -376 },
+  red: { minX: 244, maxX: 364, minZ: 376, maxZ: 400 },
 }
+/** The hangar bay: an enclosed room on the deck's far end (world X range), open to the deck through a wide doorway. */
+export const HANGAR: Record<Team, { minX: number; maxX: number; door: number }> = {
+  blue: { minX: -364, maxX: -324, door: -324 },
+  red: { minX: 324, maxX: 364, door: 324 },
+}
+export const HANGAR_HEIGHT = 10
 /** Heavy guns on each deck's outer rail, facing out (0 = +Z). */
 export const DECK_GUNS: Record<Team, { spots: Array<[number, number]>; facing: number }> = {
-  blue: { spots: [[-334, -396], [-304, -396], [-274, -396]], facing: Math.PI },
-  red: { spots: [[334, 396], [304, 396], [274, 396]], facing: 0 },
+  blue: { spots: [[-314, -396], [-284, -396], [-254, -396]], facing: Math.PI },
+  red: { spots: [[314, 396], [284, 396], [254, 396]], facing: 0 },
 }
-/** Teleport pads: one on the ground by each base's fighter pads, one on its ship's deck; each sends you to the other. */
+/** Teleport pads: one on the ground by each base's fighter pads, one inside its ship's hangar bay; each sends you to the other. */
 export const TELEPORTS: Record<Team, { ground: { x: number; z: number }; deck: { x: number; z: number } }> = {
-  blue: { ground: baseToWorld('blue', -74, 6), deck: { x: -304, z: -384 } },
-  red: { ground: baseToWorld('red', -74, 6), deck: { x: 304, z: 384 } },
+  blue: { ground: baseToWorld('blue', -74, 6), deck: { x: -354, z: -388 } },
+  red: { ground: baseToWorld('red', -74, 6), deck: { x: 354, z: 388 } },
 }
 
 /**

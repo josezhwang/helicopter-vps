@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { firstMeshGeometry, loadModel, toStandardMaterial } from './assets'
-import { DECK, DECK_TOP, SHIP_ALTITUDE, SHIP_CENTER, SHIP_YAW, TELEPORTS, type Team } from './layout'
+import { DECK, DECK_TOP, HANGAR, HANGAR_HEIGHT, SHIP_ALTITUDE, SHIP_CENTER, SHIP_YAW, TELEPORTS, type Team } from './layout'
 import { addFloor } from './floors'
 import { heightAt } from './terrain'
 import { ORBIT_START } from './sky'
@@ -13,8 +13,10 @@ export interface SpaceZone {
   group: THREE.Group
   /** If a sphere at `at` (radius r) overlaps a ship or an asteroid, where it should be pushed to; else null. */
   pushOut: (at: THREE.Vector3, radius: number) => THREE.Vector3 | null
-  /** Walls on the flight decks (railings, the hull side) for walking into. */
+  /** Walls on the flight decks and in the hangars (railings, hull side, hangar walls, cover) for walking into. */
   colliders: THREE.Box3[]
+  /** The decks' and hangars' solid parts, for rounds to hit. */
+  solids: THREE.Group
   update: (dt: number, camera: THREE.Vector3) => void
   dispose: () => void
 }
@@ -107,9 +109,14 @@ export function createSpaceZone(): SpaceZone {
   // Each ship's flight deck: a slab built out from its side on a gantry, railings and a lit wall against the
   // hull, a landing ring, glowing edges; and the teleport pads (on the deck, and on the ground by the base)
   const walls: THREE.Box3[] = []
+  const solids = new THREE.Group()
+  solids.name = 'ship-decks'
+  group.add(solids)
+  const hangarWall = new THREE.MeshStandardMaterial({ color: 0x2c3138, metalness: 0.7, roughness: 0.5 })
+  const panelLight = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0xd8ecff, emissiveIntensity: 1.6 })
   const deckMetal = new THREE.MeshStandardMaterial({ color: 0x3b4048, metalness: 0.75, roughness: 0.42 })
   const railMetal = new THREE.MeshStandardMaterial({ color: 0x5a616b, metalness: 0.8, roughness: 0.35 })
-  const deckMaterials: THREE.Material[] = [deckMetal, railMetal]
+  const deckMaterials: THREE.Material[] = [deckMetal, railMetal, hangarWall, panelLight]
   const beams: THREE.Mesh[] = []
   for (const team of ['blue', 'red'] as Team[]) {
     const d = DECK[team]
@@ -123,13 +130,20 @@ export function createSpaceZone(): SpaceZone {
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z), material)
       mesh.position.copy(min).add(max).multiplyScalar(0.5)
       mesh.castShadow = mesh.receiveShadow = true
-      mesh.raycast = () => {}
-      group.add(mesh)
-      if (solid) walls.push(new THREE.Box3(min.clone(), max.clone()))
+      // Solid parts stop rounds; trim and lights don't
+      if (solid) {
+        solids.add(mesh)
+        walls.push(new THREE.Box3(min.clone(), max.clone()))
+      } else {
+        mesh.raycast = () => {}
+        group.add(mesh)
+      }
       return mesh
     }
     const top = DECK_TOP
-    box(new THREE.Vector3(d.minX, top - 1.2, d.minZ), new THREE.Vector3(d.maxX, top, d.maxZ), deckMetal)
+    const slab = box(new THREE.Vector3(d.minX, top - 1.2, d.minZ), new THREE.Vector3(d.maxX, top, d.maxZ), deckMetal)
+    solids.add(slab)
+    slab.raycast = THREE.Mesh.prototype.raycast
     addFloor(new THREE.Box3(new THREE.Vector3(d.minX, top - 1.2, d.minZ), new THREE.Vector3(d.maxX, top, d.maxZ)))
     // Gantry into the hull, and the hull-side wall with a light band
     const hullZ = inner - out * 14
@@ -143,9 +157,45 @@ export function createSpaceZone(): SpaceZone {
     box(new THREE.Vector3(d.minX, top - 0.9, Math.min(outer, outer + out * 0.1)), new THREE.Vector3(d.maxX, top - 0.6, Math.max(outer, outer + out * 0.1)), glow)
     // A landing ring in the middle
     const ring = new THREE.Mesh(new THREE.RingGeometry(6.5, 7.1, 48).rotateX(-Math.PI / 2), glow)
-    ring.position.set((d.minX + d.maxX) / 2 + 20, top + 0.03, (d.minZ + d.maxZ) / 2)
+    ring.position.set((HANGAR[team].door + (team === 'blue' ? d.maxX : d.minX)) / 2, top + 0.03, (inner + (d.minZ + d.maxZ) / 2) / 2)
     ring.raycast = () => {}
     group.add(ring)
+    // The hangar bay: an armoured room at the deck's far end, a wide doorway onto the deck, a roof you can stand
+    // on, light panels in the ceiling, a team-coloured light band, consoles and cargo for cover
+    {
+      const h = HANGAR[team], H = HANGAR_HEIGHT
+      const far = team === 'blue' ? h.minX : h.maxX
+      const inward = Math.sign(h.door - far)
+      const lo = Math.min(d.minZ, d.maxZ), hi = Math.max(d.minZ, d.maxZ), mid = (lo + hi) / 2
+      const X = (a: number, b: number): [number, number] => [Math.min(a, b), Math.max(a, b)]
+      const wallBox = (x: [number, number], y: [number, number], z: [number, number], material: THREE.Material = hangarWall, solid = true) =>
+        box(new THREE.Vector3(x[0], top + y[0], z[0]), new THREE.Vector3(x[1], top + y[1], z[1]), material, solid)
+      const span = X(h.minX, h.maxX)
+      wallBox(X(far, far + inward * 0.8), [0, H], [lo, hi])
+      wallBox(span, [0, H], X(outer, outer - out * 0.8))
+      wallBox(span, [4.5, H], X(inner, inner - out * 0.6))
+      // Front wall with the doorway (12 m wide, 7 m high)
+      wallBox(X(h.door, h.door - inward * 0.8), [0, H], [lo, mid - 6])
+      wallBox(X(h.door, h.door - inward * 0.8), [0, H], [mid + 6, hi])
+      wallBox(X(h.door, h.door - inward * 0.8), [7, H], [mid - 6, mid + 6])
+      const roof = wallBox(span, [H, H + 0.6], [lo, hi])
+      roof.castShadow = true
+      addFloor(new THREE.Box3(new THREE.Vector3(span[0], top + H, lo), new THREE.Vector3(span[1], top + H + 0.6, hi)))
+      // Light: ceiling panels, the team band, a glowing frame round the doorway
+      for (const k of [0.25, 0.5, 0.75]) {
+        const x = span[0] + (span[1] - span[0]) * k
+        wallBox([x - 1.2, x + 1.2], [H - 0.15, H - 0.02], [lo + 3, hi - 3], panelLight, false)
+      }
+      wallBox(span, [2.3, 2.5], X(outer - out * 0.8, outer - out * 0.85), glow, false)
+      wallBox(X(h.door + inward * 0.02, h.door - inward * 0.9), [6.8, 7.1], [mid - 6, mid + 6], glow, false)
+      // Cover: consoles along the walls, a stack of cargo
+      const c = (u: number, v: number) => [far + inward * u, mid + v] as const
+      for (const [u, v, w, dd, hh] of [[9, -8, 3, 1.2, 1.3], [22, 8.5, 3, 1.2, 1.3], [16, 5, 2, 2, 1.8], [18.2, 5, 2, 2, 1.8], [17, 5, 2, 2, 3.6], [30, -6, 1.6, 1.6, 1.6]]) {
+        const [x, z] = c(u, v)
+        wallBox([x - w / 2, x + w / 2], [0, hh], [z - dd / 2, z + dd / 2], hh > 3 ? railMetal : hangarWall)
+      }
+    }
+
     // Teleport pads: a glowing disc and a faint beam of light
     const pads = TELEPORTS[team]
     for (const [x, y, z] of [[pads.deck.x, top, pads.deck.z], [pads.ground.x, heightAt(pads.ground.x, pads.ground.z), pads.ground.z]]) {
@@ -237,6 +287,7 @@ export function createSpaceZone(): SpaceZone {
     group,
     pushOut,
     colliders: walls,
+    solids,
     update(dt, camera) {
       time += dt
       // Everything up here is out of sight from the ground bar the ships; skip the rocks unless we're near

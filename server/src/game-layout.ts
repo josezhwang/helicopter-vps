@@ -62,8 +62,8 @@ export const GEM_PEDESTAL: Record<Team, [number, number]> = { blue: baseToWorld(
 
 /** Capital-ship deck guns (world XZ). */
 const DECK_GUNS: Record<Team, Array<[number, number]>> = {
-  blue: [[-334, -396], [-304, -396], [-274, -396]],
-  red: [[334, 396], [304, 396], [274, 396]],
+  blue: [[-314, -396], [-284, -396], [-254, -396]],
+  red: [[314, 396], [284, 396], [254, 396]],
 }
 
 /** Machine guns by id (`<team>-mg-<n>`), world XZ. */

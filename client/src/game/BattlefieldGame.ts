@@ -479,8 +479,8 @@ export class BattlefieldGame {
 
     // Everything that stops a bullet: terrain, bases, trees, rocks, vehicles, machine guns (player avatars are
     // added per shot). Bushes and grass are left out on purpose: they hide you but don't stop bullets.
-    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group, this.outposts.blockers]
-    this.sightBlockers = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.outposts.blockers]
+    this.targetList = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.fleet.hitGroup, this.turrets.group, this.outposts.blockers, this.space.solids]
+    this.sightBlockers = [this.terrain, this.ourBase.group, this.enemyBase.group, this.forest.trunks, this.rocks.group, this.outposts.blockers, this.space.solids]
 
     // Debug handle for console/preview smoke tests
     ;(window as unknown as { __game?: BattlefieldGame }).__game = this
@@ -777,6 +777,7 @@ export class BattlefieldGame {
       // Explosive barrels: holes ride on the barrel (and go with it when it blows); sandbags just spit sand
       if (node.userData.barrelId) { surface = 'metal'; attach = node; break }
       if (node === this.outposts.blockers) { surface = 'dirt'; hole = false; break }
+      if (node === this.space.solids) { surface = 'metal'; break }
       const vehicleId = node.userData.vehicleId as string | undefined
       if (vehicleId) {
         surface = 'metal'
@@ -2580,7 +2581,8 @@ export class BattlefieldGame {
     this.camera.rotation.order = 'YXZ'
     this.camera.rotation.set(this.player.pitch, this.player.yaw, 0)
     // Others see us standing behind the gun
-    this.player.position.set(eye.x, heightAt(eye.x, eye.z) + EYE_HEIGHT, eye.z)
+    // (on the floor the gun stands on: the ground, or a capital ship's deck)
+    this.player.position.set(eye.x, turretGround(turret) + EYE_HEIGHT, eye.z)
     this.player.velocity.set(0, 0, 0)
 
     this.gunCooldown = Math.max(0, this.gunCooldown - dt)
@@ -2909,7 +2911,7 @@ export class BattlefieldGame {
         }
         this.audio.ui('recharge')
         this.sendNetState()
-        setGameState({ message: toY === null ? 'Beamed down to the base.' : `Beamed up to ${team === this.team ? 'your' : 'the enemy'} capital ship's flight deck — man its heavy guns, or take off from here.` })
+        setGameState({ message: toY === null ? 'Beamed down to the base.' : `Beamed aboard ${team === this.team ? 'your' : 'the enemy'} capital ship — you're in its hangar bay. Walk out onto the flight deck to man the heavy guns or take off.` })
         return
       }
     }
