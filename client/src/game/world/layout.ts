@@ -65,6 +65,30 @@ export const LAYOUT = {
 }
 
 /**
+ * The capital ships hold station high over the map (noses along the X axis so their decks line up with the world
+ * axes), each with a flight deck built out from its side: walkable, fighters can land on it, three heavy guns
+ * along its rail. World coordinates; the server keeps a copy of the deck guns (server/src/game-layout.ts).
+ */
+export const SHIP_ALTITUDE = 700
+export const SHIP_CENTER: Record<Team, { x: number; z: number }> = { blue: { x: -304, z: -304 }, red: { x: 304, z: 304 } }
+export const SHIP_YAW: Record<Team, number> = { blue: Math.PI / 2, red: -Math.PI / 2 }
+export const DECK_TOP = SHIP_ALTITUDE + 4
+export const DECK: Record<Team, { minX: number; maxX: number; minZ: number; maxZ: number }> = {
+  blue: { minX: -344, maxX: -264, minZ: -400, maxZ: -376 },
+  red: { minX: 264, maxX: 344, minZ: 376, maxZ: 400 },
+}
+/** Heavy guns on each deck's outer rail, facing out (0 = +Z). */
+export const DECK_GUNS: Record<Team, { spots: Array<[number, number]>; facing: number }> = {
+  blue: { spots: [[-334, -396], [-304, -396], [-274, -396]], facing: Math.PI },
+  red: { spots: [[334, 396], [304, 396], [274, 396]], facing: 0 },
+}
+/** Teleport pads: one on the ground by each base's fighter pads, one on its ship's deck; each sends you to the other. */
+export const TELEPORTS: Record<Team, { ground: { x: number; z: number }; deck: { x: number; z: number } }> = {
+  blue: { ground: baseToWorld('blue', -74, 6), deck: { x: -304, z: -384 } },
+  red: { ground: baseToWorld('red', -74, 6), deck: { x: 304, z: 384 } },
+}
+
+/**
  * Sandbag outposts in the open between the bases (world XZ, point-symmetric pairs). Each faces the base it is
  * further from: a U of sandbag walls with an explosive barrel and an ammo box. Must match the server.
  */

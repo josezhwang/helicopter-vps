@@ -35,7 +35,12 @@ export interface TurretPlacement {
   z: number
   /** Direction the barrel points when centred (radians, 0 = +Z). */
   facing: number
+  /** What it stands on, if not the ground (the capital ships' decks). */
+  y?: number
 }
+
+/** The height a gun stands at. */
+export const turretGround = (t: TurretPlacement): number => t.y ?? heightAt(t.x, t.z)
 
 export interface Turret extends TurretPlacement {
   /** Current turn and tilt relative to `facing`; negative pitch raises the barrel. */
@@ -217,7 +222,8 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
   const circles: TurretField['circles'] = []
   const sets = bases.map((base) => {
     const turrets: Turret[] = base.placements.map((pl) => ({ ...pl, yaw: 0, pitch: 0, idle: true, occupant: null, recoil: 0 }))
-    for (const t of turrets) circles.push({ x: t.x, z: t.z, r: TURRET_BLOCK_RADIUS })
+    // (guns up on a deck don't block the ground underneath)
+    for (const t of turrets) if (t.y === undefined) circles.push({ x: t.x, z: t.z, r: TURRET_BLOCK_RADIUS })
     const setGroup = new THREE.Group()
     group.add(setGroup)
     const meshes = { near: { base: [], yaw: [], pitch: [] }, far: { base: [], yaw: [], pitch: [] } } as Record<Lod, Record<Part, THREE.InstancedMesh[]>>
@@ -245,7 +251,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
       const lod: Lod = !models.far || !camera || Math.hypot(camera.x - t.x, camera.z - t.z) < DETAIL_DISTANCE ? 'near' : 'far'
       const slot = used[lod]++
       // Sunk slightly so the base never floats on a slope
-      const y = heightAt(t.x, t.z) + frame.lift - 0.2
+      const y = turretGround(t) + frame.lift - 0.2
       world.makeRotationY(t.facing).setPosition(t.x, y, t.z).multiply(scale)
       turn.makeRotationY(t.yaw)
       // Recoil: the gun jumps back and its muzzle climbs a little, then it eases home
@@ -284,7 +290,7 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
             mesh.receiveShadow = true
             mesh.name = `turret-${lod}-${part}`
             // One sphere around the whole emplacement ring: cheap culling that survives the guns turning
-            mesh.boundingSphere = new THREE.Sphere(set.center.clone().setY(heightAt(set.center.x, set.center.z)), 90)
+            mesh.boundingSphere = new THREE.Sphere(set.center.clone(), 90)
             set.meshes[lod][part].push(mesh)
             set.group.add(mesh)
           }
@@ -300,11 +306,11 @@ export function createTurrets(bases: Array<{ center: THREE.Vector3; placements: 
     const heading = t.facing + t.yaw
     const dir = new THREE.Vector3(Math.sin(heading) * Math.cos(t.pitch), -Math.sin(t.pitch), Math.cos(heading) * Math.cos(t.pitch))
     if (!models) {
-      pivot.set(t.x, heightAt(t.x, t.z) + TURRET_HEIGHT * 0.8, t.z)
+      pivot.set(t.x, turretGround(t) + TURRET_HEIGHT * 0.8, t.z)
       muzzle.copy(pivot).addScaledVector(dir, 1.5)
     } else {
       const frame = models.near
-      const y = heightAt(t.x, t.z) + frame.lift - 0.2
+      const y = turretGround(t) + frame.lift - 0.2
       world.makeRotationY(t.facing).setPosition(t.x, y, t.z).multiply(scale.makeScale(frame.scale, frame.scale, frame.scale))
       m.copy(world).multiply(toYaw.makeTranslation(frame.yawPivot.x, frame.yawPivot.y, frame.yawPivot.z)).multiply(turn.makeRotationY(t.yaw))
         .multiply(yawToPitch.makeTranslation(frame.pitchPivot.x - frame.yawPivot.x, frame.pitchPivot.y - frame.yawPivot.y, frame.pitchPivot.z - frame.yawPivot.z))

@@ -8,7 +8,8 @@ import { createRocks, createBushes, createGrass, type GrassField, type RockField
 import { createForest, type ForestField } from './world/forest'
 import { createGrassBlades, type GrassBlades } from './world/grassField'
 import { bakeGroundMap, type GroundMap } from './world/groundMap'
-import { createTurrets, type Turret, type TurretField } from './world/turrets'
+import { createTurrets, turretGround, type Turret, type TurretField } from './world/turrets'
+import { groundAt } from './world/floors'
 import {
   createFleet, driverOf, DOOR_HOLD_MS, MAX_ROTOR_RPM, CAR_WHEELBASE, CAR_TRACK, CAR_CIRCLE_RADIUS, CAR_CIRCLE_OFFSET, CAR_GUN_PITCH, TURRET_PIVOT, GATLING_PIVOT,
   TANK_GUN_PIVOT, TANK_GUN_PITCH, TANK_TURRET_PIVOT, MECH_RADIUS, MECH_AIRBORNE, HELI_GUN_PIVOT, HELI_GUN_LIMITS, HELI_PODS, TANK_CIRCLE_RADIUS, TANK_CIRCLE_OFFSET, TANK_LENGTH, TANK_WIDTH, TANK_SIGHT, VEHICLE_MAX_HP, type Fleet, type Vehicle,
@@ -16,7 +17,7 @@ import {
 import { FIGHTER_LANDED } from './world/vehicles'
 import { fighterSpec } from './world/fighters'
 import { createSpaceZone, type SpaceZone } from './world/space'
-import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, LAYOUT, PLATEAU_HALF, baseToWorld, baseYaw } from './world/layout'
+import { BARREL_SPOTS, BASE_CENTER, BASE_ROTATION, DECK, DECK_GUNS, DECK_TOP, LAYOUT, PLATEAU_HALF, SHIP_CENTER, TELEPORTS, baseToWorld, baseYaw } from './world/layout'
 import { createOutposts, type Outposts } from './world/outposts'
 import { createGrenades, GRENADE_FUSE, THROW_SPEED, type Grenades } from './world/grenades'
 import { GameAudio, type LoopSource, type ShotSound } from './world/audio'
@@ -88,6 +89,10 @@ const CAR_WATER_LIMIT = -4.5
 /** Eye position of the car's roof gunner, in car space. */
 const CAR_GUNNER_SEAT = new THREE.Vector3(0, 2.55, -0.6)
 const WORLD_LIMIT = 480
+/** The battlefield is an iron world: bare plating, rock and a few trees, no grass or scrub. */
+const IRON_WORLD = true
+/** How close to a teleport pad's middle you have to stand. */
+const TELEPORT_RADIUS = 1.8
 /** Seconds to climb into / out of a helicopter. */
 const BOARD_TIME = 1.5
 const EXIT_TIME = 1.1
@@ -131,7 +136,7 @@ const MECH_AIM_HEIGHT = 5.4
 const MECH_CANNON = { id: 'mech-cannon', power: 22, fireRate: 0.11, range: 420, spread: 0.012, color: 0xffc46a }
 const MECH_SALVO = 6
 /** The helicopter's nose gun (the gunner's seat). */
-const HELI_GUN = { id: 'heli-gun', power: 16, fireRate: 0.09, range: 400, spread: 0.012, color: 0xffd08a }
+const HELI_GUN = { id: 'heli-gun', power: 10, fireRate: 0.05, range: 400, spread: 0.012, color: 0xffd08a }
 /**
  * Space fighter: airspeed limits (m/s) — below HOVER it hangs on its lift jets (SPACE climbs), above it flies like a
  * jet wherever the nose points — how fast it turns towards where you look, and how high it can go.
@@ -143,7 +148,7 @@ const FIGHTER_ACCEL = 34
 const FIGHTER_TURN = 1.45
 const FIGHTER_CEILING = 1000
 /** The nose lasers (alternating guns) and the homing missiles from the pods. */
-const FIGHTER_LASER = { id: 'fighter-laser', fireRate: 0.07, range: 520, color: 0x8ff0ff }
+const FIGHTER_LASER = { id: 'fighter-laser', fireRate: 0.05, range: 520, color: 0x8ff0ff }
 const FIGHTER_MISSILE_GAP = 2.3
 const FIGHTER_LOCK_CONE = 0.2
 const FIGHTER_LOCK_TIME = 1.1
@@ -222,6 +227,12 @@ export class BattlefieldGame {
   private lastVehicleYaw = 0
   private heliYaw = 0
   private heliThrottle = 0
+  /** Heavy-craft inertia: the gunship's drift, turn and climb rates, the ground vehicles' turn rate, the fighter's turn rate. */
+  private heliVelocity = new THREE.Vector3()
+  private heliYawRate = 0
+  private heliClimb = 0
+  private turnRate = 0
+  private fighterRate = 0
   /** Flying a fighter: throttle 0..1, climb speed on the lift jets, gun and missile timers, the missile lock. */
   private fighterThrottle = 0
   private fighterVy = 0
@@ -273,6 +284,9 @@ export class BattlefieldGame {
   private solidCircles: Array<{ x: number; z: number; r: number }> = []
   private colliders: THREE.Box3[] = []
   private dead = false
+  /** Teleport pads: a pad works once you've stepped off the last one, and not twice within a moment. */
+  private teleportArmed = true
+  private teleportReadyAt = 0
   /** Seconds until the next melee strike. */
   private meleeTimer = 0
   /** Kills since our last death, the current multi-kill chain and when its last kill landed. */
@@ -372,6 +386,7 @@ export class BattlefieldGame {
     this.water = createWater()
     this.scene.add(this.water.mesh)
     this.space = createSpaceZone()
+    this.colliders.push(...this.space.colliders)
     this.scene.add(this.space.group)
     for (let i = 0; i < 2; i++) {
       const light = new THREE.PointLight(0xffa860, 0, 45, 2)
@@ -393,7 +408,7 @@ export class BattlefieldGame {
     this.scene.add(this.forest.group)
     this.scene.add(this.rocks.group)
     const bushCircles: Array<{ x: number; z: number; r: number }> = []
-    this.scene.add(createBushes(bushCircles, (x, z) => inBase(x, z, 4) || this.fleet.clearance(x, z, 2) || outpost(x, z, 0)))
+    if (!IRON_WORLD) this.scene.add(createBushes(bushCircles, (x, z) => inBase(x, z, 4) || this.fleet.clearance(x, z, 2) || outpost(x, z, 0)))
 
     // Bases: blue in the south-west corner, red in the north-east; "ours" depends on the team
     this.bases = { blue: createBase('blue', this.colliders), red: createBase('red', this.colliders) }
@@ -409,7 +424,11 @@ export class BattlefieldGame {
         const at = baseToWorld(team, x, z)
         return { id: `${team}-mg-${i}`, x: at.x, z: at.z, facing: baseYaw(team, Math.atan2(x, z)) }
       }),
-    })))
+    })).concat((['blue', 'red'] as const).map((team) => ({
+      // The heavy guns on each capital ship's flight deck
+      center: new THREE.Vector3(SHIP_CENTER[team].x, DECK_TOP, (DECK[team].minZ + DECK[team].maxZ) / 2),
+      placements: DECK_GUNS[team].spots.map(([x, z], i) => ({ id: `${team}-mg-${LAYOUT.machineGuns.length + i}`, x, z, facing: DECK_GUNS[team].facing, y: DECK_TOP })),
+    }))))
     this.scene.add(this.turrets.group)
     worldCircles.push(...this.turrets.circles)
 
@@ -589,7 +608,7 @@ export class BattlefieldGame {
     if (s.vehicle) return new THREE.Vector3(...s.vehicle.p)
     if (s.gun) {
       const t = this.turrets.turrets.find((g) => g.id === s.gun!.id)
-      if (t) return new THREE.Vector3(t.x, heightAt(t.x, t.z) + 1.5, t.z)
+      if (t) return new THREE.Vector3(t.x, turretGround(t) + 1.5, t.z)
     }
     return remote.avatar?.group.visible ? remote.avatar.group.position.clone() : new THREE.Vector3(...s.p)
   }
@@ -1089,7 +1108,7 @@ export class BattlefieldGame {
     // What we carried is on the ground where we fell (the server dropped it); we respawn with fresh guns
     this.arsenal.clear()
     // Put the body on the ground (it may have been in a vehicle) so others see it fall there
-    this.player.position.y = heightAt(this.player.position.x, this.player.position.z) + EYE_HEIGHT
+    this.player.position.y = groundAt(this.player.position.x, this.player.position.z, this.player.position.y - EYE_HEIGHT) + EYE_HEIGHT
     this.carryTarget = null
     this.captureSent = false
     this.mouse.shooting = false
@@ -1156,6 +1175,11 @@ export class BattlefieldGame {
       this.scene.remove(this.blades.mesh)
       this.blades.dispose()
       this.blades = null
+    }
+    // The iron world grows no grass (the trees and rocks stand on bare plating)
+    if (IRON_WORLD) {
+      if (this.grass) this.grass.group.visible = false
+      return
     }
     if (profile.grassBlades > 0) {
       this.blades = createGrassBlades(profile.grassBlades, profile.grassRadius, this.groundMap.texture)
@@ -1316,7 +1340,7 @@ export class BattlefieldGame {
       avatar.visible = !s.vehicle
       remote.avatar.carriedGem.visible = s.flag
       remote.avatar.setWeapon(s.gun || s.vehicle ? null : (s.w || null))
-      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance, feet.y - heightAt(feet.x, feet.z) > 0.45)
+      if (avatar.visible) remote.avatar.update(dt, remote.speed, s.pitch, distance, feet.y - groundAt(feet.x, feet.z, feet.y) > 0.45)
       this.syncRemoteVehicle(remote.info.id, s, k)
       // On a machine gun: the gun follows their aim on our screen too
       if (s.gun) {
@@ -1689,6 +1713,7 @@ export class BattlefieldGame {
       if (distance < BOARD_RANGE[vehicle.kind] && (!best || distance < best.distance)) best = { vehicle, distance }
     }
     for (const turret of this.turrets.turrets) {
+      if (Math.abs(p.y - EYE_HEIGHT - turretGround(turret)) > 3) continue
       const distance = Math.hypot(p.x - turret.x, p.z - turret.z)
       if (distance < GUN_RANGE && (!best || distance < best.distance)) best = { turret, distance }
     }
@@ -1734,6 +1759,9 @@ export class BattlefieldGame {
   private enterVehicle(vehicle: Vehicle, seat: number) {
     this.vehicle = vehicle
     this.seat = seat
+    // Fresh inertia for the new ride
+    this.turnRate = this.fighterRate = this.heliYawRate = this.heliClimb = 0
+    this.heliVelocity.set(0, 0, 0)
     vehicle.occupants[seat] = this.match.you
     // Our own shots pass through the vehicle we're in
     vehicle.hitbox.traverse((node) => node.layers.set(1))
@@ -1945,12 +1973,12 @@ export class BattlefieldGame {
       const forward = new THREE.Vector3(-Math.sin(this.player.yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(this.player.yaw) * Math.cos(pitch))
       const eye = vehicle.object.position.clone().add(new THREE.Vector3(0, 1.6, 0)).addScaledVector(forward, -17).add(new THREE.Vector3(0, 3.6, 0))
       eye.y = Math.max(eye.y, heightAt(eye.x, eye.z) + 1)
-      this.camera.position.lerp(eye, Math.min(1, dt * 12))
+      this.camera.position.lerp(eye, 1 - Math.exp(-dt * 7))
       this.camera.rotation.set(pitch, this.player.yaw, 0)
     } else if (vehicle.kind === 'heli') {
       const back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)).multiplyScalar(18)
       const p = vehicle.object.position
-      this.camera.position.lerp(new THREE.Vector3(p.x + back.x, p.y + 8, p.z + back.z), Math.min(1, dt * 4))
+      this.camera.position.lerp(new THREE.Vector3(p.x + back.x, p.y + 8, p.z + back.z), 1 - Math.exp(-dt * 3))
       this.camera.lookAt(p.x, p.y + 3, p.z)
     } else {
       // Chase camera orbits the car / tank / mech with the mouse
@@ -1961,7 +1989,9 @@ export class BattlefieldGame {
       const forward = new THREE.Vector3(-Math.sin(this.player.yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(this.player.yaw) * Math.cos(pitch))
       const eye = target.addScaledVector(forward, mech ? -17 : tank ? -15.5 : -11)
       eye.y = Math.max(eye.y, heightAt(eye.x, eye.z) + 0.8)
-      this.camera.position.copy(eye)
+      // Follow smoothly (bumps and sudden stops don't jolt the view)
+      if (this.camera.position.distanceTo(eye) > 30) this.camera.position.copy(eye)
+      else this.camera.position.lerp(eye, 1 - Math.exp(-dt * 9))
       this.camera.rotation.set(pitch, this.player.yaw, 0)
     }
   }
@@ -1978,30 +2008,35 @@ export class BattlefieldGame {
     heli.targetSpin = THREE.MathUtils.clamp(heli.targetSpin, 0, MAX_ROTOR_RPM)
     const liftReady = THREE.MathUtils.clamp((heli.spin - 40) / 30, 0, 1)
 
-    this.heliYaw += turnInput * dt * 1.1 * liftReady
+    // A heavy craft: turns, climbs and speed all build up and die away; it drifts on through a turn
+    const ease = (rate: number) => 1 - Math.exp(-dt * rate)
+    this.heliYawRate = THREE.MathUtils.lerp(this.heliYawRate, turnInput * 1.1 * liftReady, ease(2.2))
+    this.heliYaw += this.heliYawRate * dt
     const yaw = this.heliYaw
     const dirX = Math.sin(yaw)
     const dirZ = Math.cos(yaw)
-    this.heliThrottle = THREE.MathUtils.lerp(this.heliThrottle, fwdInput * liftReady, Math.min(1, dt * 1.2))
+    this.heliThrottle = THREE.MathUtils.lerp(this.heliThrottle, fwdInput * liftReady, ease(0.9))
     const speed = this.heliThrottle * 60
+    this.heliVelocity.lerp(new THREE.Vector3(dirX * speed, 0, dirZ * speed), ease(1.1))
     const p = heli.object.position
-    const x = THREE.MathUtils.clamp(p.x + dirX * speed * dt, -WORLD_LIMIT, WORLD_LIMIT)
-    const z = THREE.MathUtils.clamp(p.z + dirZ * speed * dt, -WORLD_LIMIT, WORLD_LIMIT)
+    const x = THREE.MathUtils.clamp(p.x + this.heliVelocity.x * dt, -WORLD_LIMIT, WORLD_LIMIT)
+    const z = THREE.MathUtils.clamp(p.z + this.heliVelocity.z * dt, -WORLD_LIMIT, WORLD_LIMIT)
 
     const ground = this.fleet.restHeight(heli, x, z)
     const climbRate = this.input.arrowUp ? 22 : this.input.arrowDown ? -18 : 0
     // Flying forward lifts off a little on its own; without enough rotor it sinks
     const hover = fwdInput !== 0 || Math.abs(this.heliThrottle) > 0.05 ? 2.5 * liftReady : 0
-    this.heliAltitude += climbRate * dt * liftReady - (1 - liftReady) * 10 * dt
+    this.heliClimb = THREE.MathUtils.lerp(this.heliClimb, climbRate * liftReady - (1 - liftReady) * 10, ease(1.8))
+    this.heliAltitude += this.heliClimb * dt
     this.heliAltitude = THREE.MathUtils.clamp(this.heliAltitude, ground + hover, 220)
 
-    let targetRoll = -turnInput * 0.18 * Math.abs(this.heliThrottle)
+    let targetRoll = -this.heliYawRate * 0.3 * Math.abs(this.heliThrottle) - (this.heliVelocity.x * dirZ - this.heliVelocity.z * dirX) * 0.004
     if (this.input.arrowLeft) targetRoll = 0.3
     else if (this.input.arrowRight) targetRoll = -0.3
     // Nose down when flying forward (+pitch lowers the +Z nose)
     const airborne = this.heliAltitude - ground > 0.3
-    this.heliRoll = THREE.MathUtils.lerp(this.heliRoll, airborne ? targetRoll : 0, Math.min(1, dt * 5))
-    this.heliPitch = THREE.MathUtils.lerp(this.heliPitch, airborne ? this.heliThrottle * 0.22 : 0, Math.min(1, dt * 2.5))
+    this.heliRoll = THREE.MathUtils.lerp(this.heliRoll, airborne ? targetRoll : 0, ease(2.5))
+    this.heliPitch = THREE.MathUtils.lerp(this.heliPitch, airborne ? this.heliThrottle * 0.22 + this.heliClimb * -0.004 : 0, ease(1.6))
 
     p.set(x, this.heliAltitude, z)
     heli.object.rotation.set(this.heliPitch, yaw, this.heliRoll)
@@ -2032,7 +2067,10 @@ export class BattlefieldGame {
     const want = new THREE.Vector3(Math.sin(this.player.yaw + Math.PI) * Math.cos(lookPitch), Math.sin(lookPitch), Math.cos(this.player.yaw + Math.PI) * Math.cos(lookPitch))
     const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(pose.quaternion)
     const angle = nose.angleTo(want)
-    const turn = FIGHTER_TURN * (flying ? 1 : 0.7) * dt * (onGround && speed < 2 ? 0.35 : 1)
+    // The turn rate builds up and eases off as the nose comes round (no snapping)
+    const maxRate = FIGHTER_TURN * (flying ? 1 : 0.7) * (onGround && speed < 2 ? 0.35 : 1)
+    this.fighterRate = THREE.MathUtils.lerp(this.fighterRate, Math.min(maxRate, angle * 2.4), 1 - Math.exp(-dt * 2.8))
+    const turn = this.fighterRate * dt
     if (angle > 1e-4) {
       const axis = new THREE.Vector3().crossVectors(nose, want)
       if (axis.lengthSq() < 1e-8) axis.set(0, 1, 0)
@@ -2044,7 +2082,7 @@ export class BattlefieldGame {
     const yawRate = wrap(yaw - pose.rotation.y) / Math.max(dt, 1e-3)
     const rollInput = (this.input.left ? 1 : 0) - (this.input.right ? 1 : 0)
     const bank = onGround ? 0 : THREE.MathUtils.clamp(-yawRate * (flying ? 0.55 : 0.25) - rollInput * 0.7, -1.2, 1.2)
-    const roll = THREE.MathUtils.lerp(pose.rotation.z, bank, Math.min(1, dt * 3.5))
+    const roll = THREE.MathUtils.lerp(pose.rotation.z, bank, 1 - Math.exp(-dt * 2.2))
 
     // Lift jets: SPACE climbs; without it a hovering craft sinks gently, a flying one holds its line
     const liftTarget = this.input.jump ? 14 : flying ? 0 : -4
@@ -2162,7 +2200,7 @@ export class BattlefieldGame {
 
     // Steering gets gentler at speed
     const steerTarget = steerInput * CAR_MAX_STEER * (1 - 0.5 * Math.min(1, Math.abs(speed) / CAR_MAX_SPEED))
-    car.steer = THREE.MathUtils.lerp(car.steer, steerTarget, Math.min(1, dt * 6))
+    car.steer = THREE.MathUtils.lerp(car.steer, steerTarget, 1 - Math.exp(-dt * 3.5))
     const yaw = car.object.rotation.y + (speed / CAR_WHEELBASE) * Math.tan(car.steer) * dt
     const x = car.object.position.x + Math.sin(yaw) * speed * dt
     const z = car.object.position.z + Math.cos(yaw) * speed * dt
@@ -2201,8 +2239,9 @@ export class BattlefieldGame {
     // Uphill slows it, downhill helps a little
     speed += 9.8 * Math.sin(tank.object.rotation.x) * 0.35 * dt
     speed = THREE.MathUtils.clamp(speed, -TANK_REVERSE_SPEED, TANK_MAX_SPEED)
-    const turn = turnInput * TANK_TURN * (1 - 0.3 * Math.min(1, Math.abs(speed) / TANK_MAX_SPEED)) * dt
-    const yaw = tank.object.rotation.y + turn
+    // The hull's turn builds up and dies away (a heavy machine on its treads)
+    this.turnRate = THREE.MathUtils.lerp(this.turnRate, turnInput * TANK_TURN * (1 - 0.3 * Math.min(1, Math.abs(speed) / TANK_MAX_SPEED)), 1 - Math.exp(-dt * 3))
+    const yaw = tank.object.rotation.y + this.turnRate * dt
     const x = tank.object.position.x + Math.sin(yaw) * speed * dt
     const z = tank.object.position.z + Math.cos(yaw) * speed * dt
     if (this.carBlocked(tank, x, z, yaw)) {
@@ -2241,7 +2280,8 @@ export class BattlefieldGame {
     // Legs can't change pace in the air: it keeps its momentum
     let speed = this.carSpeed
     if (!airborne) speed += THREE.MathUtils.clamp(target - speed, -MECH_ACCEL * 1.6 * dt, MECH_ACCEL * dt)
-    const yaw = mech.object.rotation.y + turnInput * MECH_TURN * (airborne ? 0.5 : 1) * dt
+    this.turnRate = THREE.MathUtils.lerp(this.turnRate, turnInput * MECH_TURN * (airborne ? 0.5 : 1), 1 - Math.exp(-dt * 4))
+    const yaw = mech.object.rotation.y + this.turnRate * dt
     // Jump-jets
     if (this.input.jump && this.mechJet > 0.02) {
       this.mechVy += MECH_JET_THRUST * dt
@@ -2834,7 +2874,46 @@ export class BattlefieldGame {
     if (this.vehicle || this.dead || this.turret || this.transition) return
     const locked = document.pointerLockElement === this.renderer.domElement
     this.player.update(dt, this.input, locked)
+    this.checkTeleport()
     this.tryCapture()
+  }
+
+  /**
+   * Teleport pads: step on the one by your base's fighter pads to beam up to your capital ship's flight deck, on
+   * the deck's pad to beam back down (anyone can use any pad). Step off before it works again.
+   */
+  private checkTeleport() {
+    const p = this.player.position
+    const feetY = p.y - EYE_HEIGHT
+    let onPad = false
+    for (const team of ['blue', 'red'] as Team[]) {
+      const pads = TELEPORTS[team]
+      const routes: Array<[{ x: number; z: number }, number, { x: number; z: number }, number | null]> = [
+        [pads.ground, heightAt(pads.ground.x, pads.ground.z), pads.deck, DECK_TOP],
+        [pads.deck, DECK_TOP, pads.ground, null],
+      ]
+      for (const [from, fromY, to, toY] of routes) {
+        if (Math.hypot(p.x - from.x, p.z - from.z) > TELEPORT_RADIUS || Math.abs(feetY - fromY) > 1.5) continue
+        onPad = true
+        if (!this.teleportArmed || performance.now() < this.teleportReadyAt) continue
+        this.teleportArmed = false
+        this.teleportReadyAt = performance.now() + 1500
+        const start = p.clone()
+        // Arrive just beside the other pad
+        const x = to.x + 5, z = to.z
+        p.set(x, (toY ?? heightAt(x, z)) + EYE_HEIGHT, z)
+        this.player.velocity.set(0, 0, 0)
+        for (const at of [start, p]) {
+          this.projectiles.explosion(at.clone().setY(at.y - 0.8), 0.6, false)
+          this.flashLight(at, team === 'blue' ? 0x6fc8ff : 0xff9a6a, 3000, 0.6)
+        }
+        this.audio.ui('recharge')
+        this.sendNetState()
+        setGameState({ message: toY === null ? 'Beamed down to the base.' : `Beamed up to ${team === this.team ? 'your' : 'the enemy'} capital ship's flight deck — man its heavy guns, or take off from here.` })
+        return
+      }
+    }
+    if (!onPad) this.teleportArmed = true
   }
 
   /** Our shot: the round flies from the gun's muzzle, a casing flies out, and what it hit shows it. */

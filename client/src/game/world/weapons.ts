@@ -70,7 +70,7 @@ export const AMMO_TYPES = Object.keys(AMMO) as AmmoType[]
 /** Base machine guns: slow, heavy rounds. */
 export const MACHINE_GUN = { id: 'machine-gun', power: 45, fireRate: 0.7, range: 450, spread: 0.004, color: 0xffb35a }
 /** The battle car's roof gatling. */
-export const CAR_GUN = { id: 'car-gun', power: 14, fireRate: 0.1, range: 350, spread: 0.014, color: 0xffcf6a }
+export const CAR_GUN = { id: 'car-gun', power: 9, fireRate: 0.05, range: 350, spread: 0.014, color: 0xffcf6a }
 
 /** Holding the launcher on an enemy aircraft this long locks on. */
 export const LOCK_TIME = 2

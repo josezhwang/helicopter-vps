@@ -60,10 +60,18 @@ const HANDGUN_AMMO: Array<[number, number]> = [[8, 42], [8, 44.5], [8, 47]]
 /** Gem pedestal per team (world XZ). */
 export const GEM_PEDESTAL: Record<Team, [number, number]> = { blue: baseToWorld('blue', ...GEM), red: baseToWorld('red', ...GEM) }
 
+/** Capital-ship deck guns (world XZ). */
+const DECK_GUNS: Record<Team, Array<[number, number]>> = {
+  blue: [[-334, -396], [-304, -396], [-274, -396]],
+  red: [[334, 396], [304, 396], [274, 396]],
+}
+
 /** Machine guns by id (`<team>-mg-<n>`), world XZ. */
-export const MACHINE_GUN_SPOTS = new Map<string, [number, number]>(
-  TEAMS.flatMap((team) => MACHINE_GUNS.map((spot, i) => [`${team}-mg-${i}`, baseToWorld(team, ...spot)] as const)),
-)
+export const MACHINE_GUN_SPOTS = new Map<string, [number, number]>([
+  ...TEAMS.flatMap((team) => MACHINE_GUNS.map((spot, i) => [`${team}-mg-${i}`, baseToWorld(team, ...spot)] as const)),
+  // The heavy guns on each capital ship's flight deck, high over the map (world XZ; must match the client's DECK_GUNS)
+  ...TEAMS.flatMap((team) => DECK_GUNS[team].map((spot, i) => [`${team}-mg-${MACHINE_GUNS.length + i}`, spot] as const)),
+])
 
 /** Must match client/src/game/world/weapons.ts */
 export const WEAPONS = {

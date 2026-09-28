@@ -12,8 +12,8 @@ import type { RoundKind } from './weapons'
 export type { RoundKind }
 export type Surface = 'dirt' | 'rock' | 'concrete' | 'wood' | 'metal' | 'robot'
 
-const ROUND_SPEED = 260
-const ROUND_CAPACITY = 80
+const ROUND_SPEED = 380
+const ROUND_CAPACITY = 160
 const CASING_CAPACITY = 60
 const MISSILE_SPEED = 110
 /** Tank shells (the server times its blast by the same speed). */
@@ -149,6 +149,15 @@ export function createProjectiles(): Projectiles {
   streaks.raycast = () => {}
   streaks.setColorAt(0, new THREE.Color())
   group.add(streaks)
+  // A flame licking out behind each round: a wider, longer, fiery cone under the bright core
+  const flameGeometry = new THREE.CylinderGeometry(0.01, 0.075, 1, 7, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5)
+  const flames = new THREE.InstancedMesh(flameGeometry, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }), ROUND_CAPACITY)
+  flames.count = 0
+  flames.frustumCulled = false
+  flames.raycast = () => {}
+  flames.setColorAt(0, new THREE.Color())
+  group.add(flames)
+  const flameColour = new THREE.Color(), hot = new THREE.Color(1, 0.42, 0.08)
 
   // Smoke / dust (normal blending) and fire / sparks (additive) particles
   const texture = softTexture()
@@ -284,12 +293,20 @@ export function createProjectiles(): Projectiles {
         m.compose(p, q.setFromUnitVectors(back, r.dir.clone().negate()), s.set(heavy, heavy, tail))
         streaks.setMatrixAt(streakCount, m)
         streaks.setColorAt(streakCount, r.color)
+        // The flame: longer and fatter on the heavy guns, flickering; plasma bolts burn in their own colour
+        const flicker = 0.8 + Math.random() * 0.4
+        const flameWidth = (r.kind === 'bullet_heavy' ? 2.2 : r.kind === 'bolt' ? 2.6 : 1.2) * flicker
+        const flameLength = Math.min(r.travelled, r.kind === 'bullet_heavy' ? 14 : r.kind === 'bolt' ? 5 : 8) * flicker
+        m.compose(p, q, s.set(flameWidth, flameWidth, flameLength))
+        flames.setMatrixAt(streakCount, m)
+        flames.setColorAt(streakCount, r.kind === 'bolt' ? flameColour.copy(r.color).multiplyScalar(0.8) : flameColour.copy(hot).lerp(r.color, 0.25))
         streakCount++
       }
       for (const [kind, set] of roundMeshes) for (const mesh of set.meshes) { mesh.count = used.get(kind) ?? 0; mesh.instanceMatrix.needsUpdate = true }
-      streaks.count = streakCount
-      streaks.instanceMatrix.needsUpdate = true
+      streaks.count = flames.count = streakCount
+      streaks.instanceMatrix.needsUpdate = flames.instanceMatrix.needsUpdate = true
       if (streaks.instanceColor) streaks.instanceColor.needsUpdate = true
+      if (flames.instanceColor) flames.instanceColor.needsUpdate = true
 
       // Casings: tumble, fall, bounce once or twice, lie still, vanish
       const casingUsed = new Map<CasingKind, number>()

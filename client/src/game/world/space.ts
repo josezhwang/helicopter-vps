@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import { firstMeshGeometry, loadModel, toStandardMaterial } from './assets'
-import { BASE_CENTER, type Team } from './layout'
+import { DECK, DECK_TOP, SHIP_ALTITUDE, SHIP_CENTER, SHIP_YAW, TELEPORTS, type Team } from './layout'
+import { addFloor } from './floors'
+import { heightAt } from './terrain'
 import { ORBIT_START } from './sky'
 
 /**
@@ -11,12 +13,12 @@ export interface SpaceZone {
   group: THREE.Group
   /** If a sphere at `at` (radius r) overlaps a ship or an asteroid, where it should be pushed to; else null. */
   pushOut: (at: THREE.Vector3, radius: number) => THREE.Vector3 | null
+  /** Walls on the flight decks (railings, the hull side) for walking into. */
+  colliders: THREE.Box3[]
   update: (dt: number, camera: THREE.Vector3) => void
   dispose: () => void
 }
 
-/** Capital ships: this high over their base. */
-const SHIP_ALTITUDE = 700
 const ASTEROIDS = 70
 /** Deterministic randomness, so every player sees the same field. */
 function random(seed: number) {
@@ -69,9 +71,8 @@ export function createSpaceZone(): SpaceZone {
   // Capital ships, noses towards the enemy's
   const ships = (['blue', 'red'] as Team[]).map((team) => {
     const ship = new THREE.Group()
-    const c = BASE_CENTER[team]
-    ship.position.set(c.x * 0.8, SHIP_ALTITUDE, c.z * 0.8)
-    ship.rotation.y = Math.atan2(-c.x, -c.z)
+    ship.position.set(SHIP_CENTER[team].x, SHIP_ALTITUDE, SHIP_CENTER[team].z)
+    ship.rotation.y = SHIP_YAW[team]
     ship.updateMatrixWorld()
     ship.add(shipModel(team))
     group.add(ship)
@@ -101,6 +102,63 @@ export function createSpaceZone(): SpaceZone {
       holder.add(model)
     }).catch((error) => console.error('[space] capital ship failed to load:', error))
     return holder
+  }
+
+  // Each ship's flight deck: a slab built out from its side on a gantry, railings and a lit wall against the
+  // hull, a landing ring, glowing edges; and the teleport pads (on the deck, and on the ground by the base)
+  const walls: THREE.Box3[] = []
+  const deckMetal = new THREE.MeshStandardMaterial({ color: 0x3b4048, metalness: 0.75, roughness: 0.42 })
+  const railMetal = new THREE.MeshStandardMaterial({ color: 0x5a616b, metalness: 0.8, roughness: 0.35 })
+  const deckMaterials: THREE.Material[] = [deckMetal, railMetal]
+  const beams: THREE.Mesh[] = []
+  for (const team of ['blue', 'red'] as Team[]) {
+    const d = DECK[team]
+    const glow = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: TEAM_GLOW[team], emissiveIntensity: 2.2 })
+    const beamMaterial = new THREE.MeshBasicMaterial({ color: TEAM_GLOW[team], transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide })
+    deckMaterials.push(glow, beamMaterial)
+    const outer = team === 'blue' ? d.minZ : d.maxZ, inner = team === 'blue' ? d.maxZ : d.minZ
+    const out = Math.sign(outer - inner)
+    const box = (min: THREE.Vector3, max: THREE.Vector3, material: THREE.Material, solid = false) => {
+      const size = max.clone().sub(min)
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z), material)
+      mesh.position.copy(min).add(max).multiplyScalar(0.5)
+      mesh.castShadow = mesh.receiveShadow = true
+      mesh.raycast = () => {}
+      group.add(mesh)
+      if (solid) walls.push(new THREE.Box3(min.clone(), max.clone()))
+      return mesh
+    }
+    const top = DECK_TOP
+    box(new THREE.Vector3(d.minX, top - 1.2, d.minZ), new THREE.Vector3(d.maxX, top, d.maxZ), deckMetal)
+    addFloor(new THREE.Box3(new THREE.Vector3(d.minX, top - 1.2, d.minZ), new THREE.Vector3(d.maxX, top, d.maxZ)))
+    // Gantry into the hull, and the hull-side wall with a light band
+    const hullZ = inner - out * 14
+    box(new THREE.Vector3(d.minX + 10, top - 5, Math.min(inner, hullZ)), new THREE.Vector3(d.maxX - 10, top - 1.2, Math.max(inner, hullZ)), railMetal)
+    box(new THREE.Vector3(d.minX, top, Math.min(inner, inner - out * 0.6)), new THREE.Vector3(d.maxX, top + 4.5, Math.max(inner, inner - out * 0.6)), railMetal, true)
+    box(new THREE.Vector3(d.minX, top + 2.2, Math.min(inner, inner + out * 0.05)), new THREE.Vector3(d.maxX, top + 2.45, Math.max(inner, inner + out * 0.05)), glow)
+    // Railings (outer edge and both ends) with glowing caps, and light strips along the deck's edges
+    box(new THREE.Vector3(d.minX, top, Math.min(outer, outer - out * 0.3)), new THREE.Vector3(d.maxX, top + 1.6, Math.max(outer, outer - out * 0.3)), railMetal, true)
+    box(new THREE.Vector3(d.minX, top + 1.6, Math.min(outer, outer - out * 0.3)), new THREE.Vector3(d.maxX, top + 1.72, Math.max(outer, outer - out * 0.3)), glow)
+    for (const x of [d.minX, d.maxX - 0.3]) box(new THREE.Vector3(x, top, d.minZ), new THREE.Vector3(x + 0.3, top + 1.6, d.maxZ), railMetal, true)
+    box(new THREE.Vector3(d.minX, top - 0.9, Math.min(outer, outer + out * 0.1)), new THREE.Vector3(d.maxX, top - 0.6, Math.max(outer, outer + out * 0.1)), glow)
+    // A landing ring in the middle
+    const ring = new THREE.Mesh(new THREE.RingGeometry(6.5, 7.1, 48).rotateX(-Math.PI / 2), glow)
+    ring.position.set((d.minX + d.maxX) / 2 + 20, top + 0.03, (d.minZ + d.maxZ) / 2)
+    ring.raycast = () => {}
+    group.add(ring)
+    // Teleport pads: a glowing disc and a faint beam of light
+    const pads = TELEPORTS[team]
+    for (const [x, y, z] of [[pads.deck.x, top, pads.deck.z], [pads.ground.x, heightAt(pads.ground.x, pads.ground.z), pads.ground.z]]) {
+      const disc = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.9, 0.25, 32), glow)
+      disc.position.set(x, y + 0.12, z)
+      disc.raycast = () => {}
+      group.add(disc)
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.7, 7, 24, 1, true), beamMaterial)
+      beam.position.set(x, y + 3.6, z)
+      beam.raycast = () => {}
+      group.add(beam)
+      beams.push(beam)
+    }
   }
 
   // The station, far overhead
@@ -178,6 +236,7 @@ export function createSpaceZone(): SpaceZone {
   return {
     group,
     pushOut,
+    colliders: walls,
     update(dt, camera) {
       time += dt
       // Everything up here is out of sight from the ground bar the ships; skip the rocks unless we're near
@@ -192,11 +251,12 @@ export function createSpaceZone(): SpaceZone {
         for (const mesh of meshes) mesh.instanceMatrix.needsUpdate = true
       }
       // The ships ride gently on station
-      for (const ship of ships) ship.group.position.y = ship.base.y + Math.sin(time * 0.2 + (ship.team === 'red' ? 2 : 0)) * 3
       station.rotation.y += dt * 0.01
+      for (const beam of beams) beam.rotation.y += dt * 0.6
     },
     dispose() {
       for (const m of shipMaterials.values()) m.dispose()
+      for (const m of deckMaterials) m.dispose()
       for (const geometry of shapes) geometry.dispose()
       rockMaterial.dispose()
     },

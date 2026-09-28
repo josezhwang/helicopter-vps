@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { heightAt } from './terrain'
+import { groundAt } from './floors'
 
 export interface PlayerInput {
   forward: boolean
@@ -16,6 +17,10 @@ const GRAVITY = 24
 const JUMP_SPEED = 8.5
 const WALK_SPEED = 9
 const SPRINT_SPEED = 15
+/** How fast the body gets up to speed and comes to a stop (m/s²) — on the ground, and the little steering in the air. */
+const GROUND_ACCEL = 60
+const GROUND_BRAKE = 48
+const AIR_ACCEL = 10
 
 export class Player {
   position = new THREE.Vector3()
@@ -80,8 +85,14 @@ export class Player {
       // Rotate wish into world space (Y-rotation matching the camera)
       const worldX = wish.x * cos + wish.z * sin
       const worldZ = -wish.x * sin + wish.z * cos
-      this.velocity.x = worldX * speed
-      this.velocity.z = worldZ * speed
+      // Ease towards the wanted velocity (a moment to get going and to stop, not instant)
+      const moving = wish.lengthSq() > 0
+      const rate = (this.onGround ? (moving ? GROUND_ACCEL : GROUND_BRAKE) : AIR_ACCEL) * dt
+      const dvx = worldX * speed - this.velocity.x, dvz = worldZ * speed - this.velocity.z
+      const change = Math.hypot(dvx, dvz)
+      const k = change > rate ? rate / change : 1
+      this.velocity.x += dvx * k
+      this.velocity.z += dvz * k
     }
 
     // Jump / gravity
@@ -132,8 +143,8 @@ export class Player {
     next.x = THREE.MathUtils.clamp(next.x, -490, 490)
     next.z = THREE.MathUtils.clamp(next.z, -490, 490)
 
-    // Ground follow (terrain height)
-    const groundY = heightAt(next.x, next.z) + EYE_HEIGHT
+    // Ground follow (the terrain, or a deck we're standing on)
+    const groundY = groundAt(next.x, next.z, this.position.y - EYE_HEIGHT) + EYE_HEIGHT
     if (next.y <= groundY) {
       next.y = groundY
       this.velocity.y = 0

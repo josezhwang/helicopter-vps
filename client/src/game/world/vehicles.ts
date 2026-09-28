@@ -5,6 +5,8 @@ import { heightAt } from './terrain'
 import { baseToWorld, baseYaw, LAYOUT, type Team } from './layout'
 import { createMechRig, type MechRig } from './mechs'
 import { createFighterRig, fighterSpec, type FighterRig } from './fighters'
+import { createTrails } from './trails'
+import { groundAt } from './floors'
 
 /**
  * Each team's motor pool: FLEET_SIZE helicopters on the base's landing area and FLEET_SIZE battle cars parked
@@ -349,7 +351,8 @@ export function createFleet(): Fleet {
   }
 
   // Helicopters stand on the base's level concrete; cars on the ground outside
-  const restHeight = (_v: Vehicle, x: number, z: number) => heightAt(x, z) + 0.02
+  // (or on a capital ship's flight deck, for a fighter that lands there)
+  const restHeight = (v: Vehicle, x: number, z: number) => groundAt(x, z, v.object.position.y) + 0.02
 
   const clearance = (x: number, z: number, margin = 0) => spots.some((s) => Math.hypot(s.x - x, s.z - z) < (s.kind === 'heli' || s.kind === 'fighter' ? 8 : s.kind === 'tank' || s.kind === 'mech' ? 6 : 5) + margin)
 
@@ -417,6 +420,9 @@ export function createFleet(): Fleet {
     mechTrack.set(v, { y: v.object.position.y, rising: false, yaw: v.object.rotation.y, turn: 0 })
     group.add(rig.object)
   }
+  // Trails behind the aircraft
+  const trails = createTrails()
+  group.add(trails.group)
   // Fighters too (a handful, each its own model)
   const fighterRigs = new Map<Vehicle, FighterRig>()
   for (const v of vehicles) {
@@ -533,8 +539,6 @@ export function createFleet(): Fleet {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
   }
-  const spinAbout = (hub: THREE.Vector3, axis: THREE.Vector3, angle: number) =>
-    part.copy(toHub.makeTranslation(hub.x, hub.y, hub.z)).multiply(spinM.makeRotationAxis(axis, angle)).multiply(fromHub.makeTranslation(-hub.x, -hub.y, -hub.z))
   const zAxis = new THREE.Vector3(0, 0, 1)
   /** Car-space matrices of the roof dome and the gatling for the gun's current aim. */
   const gunMatrices = (v: Vehicle, turret: THREE.Matrix4, gatling: THREE.Matrix4) => {
@@ -674,7 +678,9 @@ export function createFleet(): Fleet {
         // The four lift fans spin (alternate ones the other way)
         DROP.fans.forEach((hub, k) => {
           const c = hind(hub)
-          setInstances(heliModel!.fans, n * DROP.fans.length + k, spinAbout(c, yAxis, (k % 2 ? -1 : 1) * v.rotorAngle * 3).premultiply(m), tint)
+          // (the fan model is centred on its own axis: move it to its duct, then spin it there)
+          part.makeTranslation(c.x, c.y, c.z).multiply(spinM.makeRotationY((k % 2 ? -1 : 1) * v.rotorAngle * 3)).premultiply(m)
+          setInstances(heliModel!.fans, n * DROP.fans.length + k, part, tint)
         })
         setInstances(heliModel.gun, n, part.multiplyMatrices(m, heliGunMatrix(v, turretM)), tint)
         n++
@@ -691,7 +697,23 @@ export function createFleet(): Fleet {
       const landed = v.object.position.y - heightAt(v.object.position.x, v.object.position.z) < FIGHTER_LANDED + 0.4
       const thrust = v.destroyed ? 0 : v.occupants[0] === null && landed ? 0 : 0.15 + Math.min(1.6, v.spin / 90)
       rig.update(v.object, thrust, dt)
+      // Engine glow trails, and vapour trails once it's really flying
+      const flying = !v.destroyed && !landed && v.spin > 30
+      fighterSpec(v.team).engines.forEach(({ at }, k) => {
+        const world = v.object.localToWorld(at.clone())
+        trails.emit(`${v.id}-${k}`, 'glow', world, v.team === 'blue' ? 0x6fd4ff : 0xffa15a, !v.destroyed && thrust > 0.25, Math.min(1, thrust))
+        if (k === 0 || k === fighterSpec(v.team).engines.length - 1) trails.emit(`${v.id}-${k}`, 'vapour', world, 0xe8f0f4, flying, Math.min(1, v.spin / 120))
+      })
     }
+    // Gunships leave a faint wake from their rear fans when they fly
+    for (const v of helis) {
+      const up = v.object.position.y - restHeight(v, v.object.position.x, v.object.position.z) > 3
+      for (const k of [0, 1]) {
+        const world = v.object.localToWorld(hind(DROP.fans[k]).add(new THREE.Vector3(0, -0.6, -0.8)))
+        trails.emit(`${v.id}-fan${k}`, 'vapour', world, 0xdfe7ea, up && !v.destroyed && v.spin > 40, 0.55)
+      }
+    }
+    trails.update(dt, camera)
 
     for (const [v, rig] of mechRigs) {
       const d2 = v.object.position.distanceToSquared(camera)

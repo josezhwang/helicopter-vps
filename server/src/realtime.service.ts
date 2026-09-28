@@ -116,7 +116,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const VEHICLE_ID = /^(blue|red)-(heli|car|tank|mech|fighter)-[0-4]$/
 /** Aircraft: what anti-aircraft and fighter missiles lock on to. */
 const HELI_ID = /^(blue|red)-(heli|fighter)-[0-4]$/
-const GUN_ID = /^(blue|red)-mg-[0-4]$/
+const GUN_ID = /^(blue|red)-mg-[0-7]$/
 const SEATS = { heli: 4, car: 1, tank: 1, mech: 1, fighter: 1 }
 const MIN_STATE_INTERVAL_MS = 30
 const CAPTURE_RADIUS = 14
@@ -135,13 +135,13 @@ const RESPAWN_MS = 5000
 const WEAPONS: Record<string, { power: number; fireRate: number; range: number }> = {
   ...Object.fromEntries(Object.entries(ARMS).filter(([kind]) => kind !== 'launcher').map(([kind, w]) => [kind, { power: w.power, fireRate: w.fireRate, range: w.range }])),
   'machine-gun': { power: 45, fireRate: 0.7, range: 450 },
-  'car-gun': { power: 14, fireRate: 0.1, range: 350 },
+  'car-gun': { power: 9, fireRate: 0.05, range: 350 },
   'mech-cannon': { power: 22, fireRate: 0.11, range: 420 },
-  'fighter-laser': { power: 14, fireRate: 0.07, range: 520 },
-  'heli-gun': { power: 16, fireRate: 0.09, range: 400 },
+  'fighter-laser': { power: 10, fireRate: 0.05, range: 520 },
+  'heli-gun': { power: 10, fireRate: 0.05, range: 400 },
 }
 const EMPTY_LOADOUT = (): PlayerState['inv'] => ({ s: [null, null, null], r: {} })
-const MIN_FIRE_RATE = 0.07
+const MIN_FIRE_RATE = 0.045
 // Positions are up to one network tick stale on each side
 const RANGE_SLACK = 25
 const FIRE_RATE_SLACK = 0.6
